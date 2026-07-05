@@ -57,6 +57,12 @@ def sample_dataset(
 class LazyLLMDataset(Dataset):
     """This class if used to lazy tokenize the dataset, and skips bad ones when training"""
 
+    # [新手导读] 容错式惰性编码：__getitem__ 被 DataLoader 调用时才执行
+    # template.encode（messages -> input_ids），而非训练前全量预编码。
+    # 两个工程意义：① 多模态/大数据集无需把编码结果全部装入内存；
+    # ② 真实数据里总有超长/脏样本，默认策略是"跳过并随机换一条重试"
+    #   （最多 n_try_fetch 次）而不是让训练中途崩溃；strict=True 则改为直接报错。
+
     def __init__(self,
                  dataset: HfDataset,
                  encode_func: Callable[[Dict[str, Any]], Dict[str, Any]],
@@ -87,6 +93,8 @@ class LazyLLMDataset(Dataset):
             return self.dataset[idx]
         for i in range(self.n_try_fetch):
             if i > 0:
+                # 重试时不再使用原 idx，而是从预先打乱的索引序列中顺序取下一条，
+                # 保证替补样本的分布仍是随机的。
                 idx = self._idx_list[self._idx]
                 self._idx = (self._idx + 1) % len(self.dataset)
             data = self.dataset[idx]
@@ -96,6 +104,8 @@ class LazyLLMDataset(Dataset):
                 if self.strict:
                     logger.warning('To avoid errors, you can pass `strict=False`.')
                     raise
+                # 超长样本（MaxLengthError）是预期内的常见情况，静默换样本即可；
+                # 其他异常则打印前几次的 traceback 以便用户排查数据问题。
                 if isinstance(e, MaxLengthError):
                     continue
                 if self.traceback_limit is not None and self._traceback_counter < self.traceback_limit:

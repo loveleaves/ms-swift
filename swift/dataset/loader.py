@@ -19,6 +19,10 @@ logger = get_logger()
 
 
 class DatasetLoader(BaseDatasetLoader):
+    """[新手导读] 默认数据集加载器：把"本地文件(jsonl/csv/txt)"与"Hub 仓库
+    (ModelScope/HuggingFace)"两种来源统一为 HfDataset，并在加载后立即调用
+    DatasetMeta.preprocess_func 把原始字段标准化为 messages 格式。
+    """
 
     def __init__(
         self,
@@ -302,6 +306,12 @@ def load_dataset(
         ...     model_author=('作者', 'Author')
         ... )
     """
+    # [新手导读] --dataset 参数的处理入口。对每个数据集表达式：
+    #   1. DatasetSyntax.parse 解析 'ms_id#2000'、'path.jsonl'、'id:subset' 等语法
+    #      （采样数、子集、HF/MS 前缀）；
+    #   2. 查 DATASET_MAPPING 取注册信息（未注册的 id/路径会生成临时 DatasetMeta）；
+    #   3. loader.load 下载+标准化，post_process 采样并切分 train/val；
+    # 最后把多个数据集 concat（或按 interleave_prob 加权交错）。
     init_self_cognition_preprocessor(DATASET_MAPPING.get('self-cognition'), model_name, model_author)
     if isinstance(datasets, str):
         datasets = [datasets]

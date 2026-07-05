@@ -55,6 +55,13 @@ class BaseModelLoader(ABC):
 
 @dataclass
 class ModelMeta:
+    # [新手导读] 一类模型的"注册信息卡"。注册新模型支持时，主要就是填写这个 dataclass：
+    #   model_type:   模型结构的唯一 ID（同一 model_type 共享模板、加载方式等）
+    #   model_groups: 该类型下的具体模型列表（魔搭/HF 双 id），用于按模型名自动匹配 model_type
+    #   template:     默认对话模板（对应 TEMPLATE_MAPPING 中的 key）
+    #   model_arch:   多模态模型中 llm/vit/aligner 各部分的参数前缀映射，
+    #                 决定 --freeze_vit 等开关冻结哪些参数（见 model_arch.py）
+    #   architectures: config.json 中的 architectures 字段，是自动匹配 model_type 的第二依据
     model_type: Optional[str]
     # Used to list the model_ids from modelscope/huggingface,
     # which participate in the automatic inference of the model_type.
@@ -119,11 +126,15 @@ class ModelMeta:
             logger.warning(f'Please install the package: `pip install {requires} -U`.')
 
 
+# 全局模型注册表：model_type -> ModelMeta。内置模型在 models/ 目录下通过
+# register_model() 填充；--model_type 等参数最终都是来这里查表。
 MODEL_MAPPING: Dict[str, ModelMeta] = {}
 
 
 @dataclass
 class ModelInfo:
+    # 与 ModelMeta 的区别：ModelMeta 是"注册时"的静态元信息（一类模型一份），
+    # ModelInfo 是"运行时"针对具体某个模型目录解析出的信息（dtype、量化方式、最大长度等）。
     model_type: str
     model_dir: str
     torch_dtype: torch.dtype
@@ -160,6 +171,8 @@ def get_model_name(model_id_or_path: str) -> Optional[str]:
 
 
 def get_matched_model_meta(model_id_or_path: str) -> Optional[ModelMeta]:
+    # 自动匹配 model_type 的第一依据：用 --model 的最后一段名称（如 Qwen3-8B）
+    # 与注册表中所有 ModelGroup 的模型 id 后缀逐一比对。
     model_name = get_model_name(model_id_or_path).lower()
     for model_type, model_meta in MODEL_MAPPING.items():
         model_group = ModelMeta.get_matched_model_group(model_meta, model_name)
@@ -260,6 +273,12 @@ def get_model_info_meta(
         num_labels=None,
         problem_type=None,
         **kwargs) -> Tuple[ModelInfo, ModelMeta]:
+    # [新手导读] 模型加载前的"识别"阶段，回答两个问题：这是哪类模型（model_meta）、
+    # 这个模型目录的实际配置是什么（model_info）。匹配顺序：
+    #   1. 按模型名后缀匹配注册表（get_matched_model_meta）；
+    #   2. 下载/定位模型目录（默认 ModelScope，--use_hf 切 HuggingFace）；
+    #   3. 仍未确定时读 checkpoint 的 args.json 或按 config.json 的 architectures 匹配；
+    #   4. 纯文本模型实在匹配不到则降级为 'dummy' 模板的临时 meta（多模态则直接报错）。
     from .register import ModelLoader
     model_meta = get_matched_model_meta(model_id_or_path)
     model_dir = safe_snapshot_download(

@@ -30,6 +30,10 @@ def register_dataset(dataset_meta: DatasetMeta, *, exist_ok: bool = False) -> No
         dataset_meta: The `DatasetMeta` info of the dataset.
         exist_ok: If the dataset id exists, raise error or update it.
     """
+    # [新手导读] 数据集版的"Meta + register + MAPPING 三件套"。
+    # DatasetMeta 的核心字段是 preprocess_func：负责把该数据集的原始字段
+    # 标准化为统一的 messages 格式，之后的编码/packing/collate 全由框架接管。
+    # 内置数据集大多通过 data/dataset_info.json 经下方 register_dataset_info 批量注册。
     if dataset_meta.dataset_name:
         dataset_name = dataset_meta.dataset_name
     else:

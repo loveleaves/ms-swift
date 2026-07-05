@@ -31,12 +31,21 @@ class TemplateMeta:
         <|im_start|>assistant
         {{RESPONSE}}<|im_end|>  # suffix
     """
+    # [新手导读] 模板的"配方"：注册一个新模板就是填好下面的五要素，
+    # 拼接逻辑由 Template._swift_encode 统一实现。
+    #   prefix:        整段对话的开头（如 bos），无 system 时使用
+    #   prompt:        每轮 user 消息的包装格式，{{QUERY}} 为占位符
+    #   chat_sep:      多轮对话中相邻轮次之间的分隔符；为 None 表示不支持多轮
+    #   suffix:        最后一轮回复的结尾（通常是 eos），训练时标记生成结束
+    #   system_prefix: 含 {{SYSTEM}} 占位符的开头，有 system 时替代 prefix
+    # Prompt 类型是 List[str | List[int]]：字符串会被 tokenize，
+    # 列表（如 ['eos_token_id']）会在 init() 中被解析为 token id。
     template_type: str
     prefix: Prompt
     prompt: Prompt
     chat_sep: Optional[Prompt]
     suffix: Prompt = field(default_factory=lambda: [['eos_token_id']])
-    template_cls: Type[Template] = Template
+    template_cls: Type[Template] = Template  # 多模态等复杂模板可指定自定义 Template 子类
     system_prefix: Optional[Prompt] = None
     default_system: Optional[str] = None
 
@@ -79,6 +88,9 @@ class TemplateMeta:
             assert x is None or isinstance(x, list)
 
     def __post_init__(self):
+        # 规整化：允许注册者把 {{SYSTEM}} 直接写在 prefix 里（自动拆分出 system_prefix），
+        # 或写在 prompt 里（system 跟在 user 消息中的"后置 system"，如 mistral_nemo）。
+        # 并据此推导 support_system / support_multi_round 两个能力标记。
         # system
         if self._has_system(self.prefix):
             assert self.system_prefix is None, 'The prefix already contains {{SYSTEM}}.'
@@ -114,6 +126,8 @@ class TemplateMeta:
         return res_value
 
     def init(self, tokenizer: PreTrainedTokenizerBase) -> None:
+        # 绑定具体 tokenizer：把 'eos_token_id' 这类符号名解析为真实 token id，
+        # 并从 suffix 推导停止词（stop_words）与停止 token，供推理时判断生成结束。
         for key in ['prefix', 'prompt', 'chat_sep', 'suffix', 'system_prefix']:
             value = getattr(self, key)
             value = self._token_attr_to_id(tokenizer, value)

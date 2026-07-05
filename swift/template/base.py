@@ -597,6 +597,11 @@ class Template(ProcessorMixin):
         Returns:
             return {'input_ids': List[int], 'labels': Optional[List[int]], ...}
         """
+        # [新手导读] 模板的总入口：messages 等标准格式 -> 模型张量输入。
+        # 整体分发逻辑：先按 task_type（causal_lm/seq_cls/embedding/...）和
+        # mode（train/rlhf/kto/推理后端）选择对应的编码路径，
+        # 普通 SFT 走 _encode_truncated -> _encode -> _swift_encode（拼接模板片段）。
+        # 训练时 labels 中 prompt 部分为 -100（不参与 loss），response 部分为真实 token id。
         from swift.infer_engine import InferRequest
         assert self._processor_inited, ('Please initialize the processor before calling the template.encode method: '
                                         'template.init_processor(processor).')
@@ -1237,6 +1242,12 @@ class Template(ProcessorMixin):
                 i += 1
 
     def _swift_encode(self, inputs: StdTemplateInputs):
+        # [新手导读] swift 模板引擎的核心：按 TemplateMeta 的五要素
+        # （prefix/prompt/chat_sep/suffix/system_prefix）把多轮 messages 拼成
+        # "上下文片段列表" res_context_list。片段可以是字符串（待 tokenize）或
+        # token id 列表（如 eos_token_id）。同时记录每个片段的类型
+        # （ContextType.RESPONSE/SUFFIX/OTHER），供 loss_scale 决定哪些 token 参与 loss。
+        # 拼接规则可对照 TemplateMeta 的 docstring 中 chatml 的例子理解。
         template_meta = self.template_meta
         if self.use_chat_template:
             if self.add_non_thinking_prefix:
@@ -1277,6 +1288,9 @@ class Template(ProcessorMixin):
 
         assert len(inputs.messages) > 0, f'inputs.messages: {inputs.messages}'
         n_round = len(inputs.messages) // 2
+        # 逐轮遍历对话：messages 此时已被规整为 [user, assistant, user, assistant, ...]，
+        # 每轮套用 prompt 模板填入 {{QUERY}}，再接 {{RESPONSE}}；
+        # 非最后一轮补 chat_sep，最后一轮（训练时）补 suffix（通常含 eos）。
         for i, (query_message, response_message) in enumerate(zip(inputs.messages[::2], inputs.messages[1::2])):
             query_role, query = query_message['role'], query_message['content']
             response_role, response = response_message['role'], response_message['content']
@@ -1446,6 +1460,9 @@ class Template(ProcessorMixin):
         return encoded
 
     def _encode(self, inputs: StdTemplateInputs) -> Dict[str, Any]:
+        # [新手导读] 把 _swift_encode 产出的"上下文片段列表"真正 tokenize 成
+        # input_ids/labels/loss_scale 三个等长序列。多模态模板子类会重写本方法，
+        # 在此基础上处理图像 token 展开等逻辑。
         inputs.messages = deepcopy(inputs.messages)
         template_backend = self.template_backend
         if (self.template_meta.template_type == 'dummy' and self.use_chat_template and not self.is_training
@@ -1480,10 +1497,12 @@ class Template(ProcessorMixin):
         encoded['input_ids'] = input_ids
         encoded['labels'] = labels
         encoded['loss_scale'] = loss_scale
+        # causal LM 是"预测下一个 token"，首个 token 没有前文可供预测，置 -100 排除出 loss。
         if encoded.get('labels') is not None:
             encoded['labels'][0] = -100
         if encoded.get('loss_scale') is not None:
             encoded['loss_scale'][0] = 0
+        # 推理模式不需要 labels（没有监督目标），全部置 None。
         if not self.is_training:
             for k in list(encoded.keys()):
                 if k.endswith('labels') or k.endswith('loss_scale'):
@@ -1583,6 +1602,10 @@ class Template(ProcessorMixin):
         return self.mode not in {'transformers', 'vllm', 'lmdeploy', 'sglang'}
 
     def set_mode(self, mode: Literal['transformers', 'vllm', 'lmdeploy', 'sglang', 'train', 'rlhf', 'kto']) -> None:
+        # [新手导读] 同一个模板对象通过切换 mode 服务于训练与推理两侧：
+        # train/rlhf/kto 为训练模式（编码出 labels），transformers/vllm/lmdeploy/sglang
+        # 为四种推理后端模式。这保证了"训练怎么编码、推理就怎么编码"，
+        # 从根上避免训推模板不一致的 bug。
         if mode == 'pt':
             mode = 'transformers'
             logger.warning("The mode 'pt' is deprecated, please use 'transformers'.")

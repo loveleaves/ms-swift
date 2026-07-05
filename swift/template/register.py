@@ -10,6 +10,10 @@ from .template_meta import TemplateMeta
 if TYPE_CHECKING:
     from swift.model import ModelInfo, ModelMeta
 
+# [新手导读] 全局模板注册表：template_type -> TemplateMeta。
+# 这是框架"Meta + register + MAPPING 三件套"扩展机制的典型实例
+# （model/dataset/loss 等模块同理）。内置模板在 templates/ 目录中注册；
+# 用户也可通过 --external_plugins 在不改框架源码的情况下调用 register_template 注入新模板。
 TEMPLATE_MAPPING: Dict[str, TemplateMeta] = {}
 
 
@@ -31,6 +35,8 @@ def _read_args_json_template_type(model_dir):
 def get_template_meta(model_info: 'ModelInfo',
                       model_meta: 'ModelMeta',
                       template_type: Optional[str] = None) -> TemplateMeta:
+    # 模板的确定优先级：--template 显式指定 > checkpoint 内 args.json 记录
+    # > ModelMeta 注册的默认模板 > 唯一候选模板，均无法确定则报错要求手动指定。
     if template_type is None and model_info is not None:
         template_type = _read_args_json_template_type(model_info.model_dir)
     template_type = template_type or model_meta.template

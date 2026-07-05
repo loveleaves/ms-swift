@@ -33,6 +33,9 @@ def register_model(model_meta: ModelMeta, *, exist_ok: bool = False) -> None:
     model_type: The unique ID for the model type. Models with the same model_type share
         the same architectures, template, get_function, etc.
     """
+    # [新手导读] 把一个 ModelMeta 写入全局注册表 MODEL_MAPPING。
+    # 内置模型的注册都在 models/ 目录（如 models/qwen.py 末尾的一串 register_model 调用），
+    # 用户可通过 --external_plugins 文件调用本函数支持框架尚未收录的模型。
     from .model_arch import get_model_arch
     model_type = model_meta.model_type
     if not exist_ok and model_type in MODEL_MAPPING:
@@ -158,6 +161,11 @@ def get_model_list() -> List[str]:
 
 
 class ModelLoader(BaseModelLoader):
+    """[新手导读] 默认的模型加载器，本质是对 transformers `AutoModel.from_pretrained`
+    的工程化封装。主流程见 load()：读 config -> 修补 config（dtype/rope/attn 实现等）
+    -> 加载 processor 与模型权重 -> 后处理（挂上 model_info/model_meta、generation_config 等）。
+    特殊模型可在 ModelMeta.loader 中指定自定义子类（如下方的 SentenceTransformersLoader）。
+    """
     default_trust_remote_code = True
 
     def __init__(
@@ -468,6 +476,8 @@ class ModelLoader(BaseModelLoader):
         return model, processor
 
     def load(self) -> Tuple[Optional[PreTrainedModel], Processor]:
+        # 加载主入口。注意各步骤的顺序依赖：config 必须先于模型加载完成修补
+        # （attn 实现、dtype 等只在 from_pretrained 时生效）。
         patch_offload_context = patch_attach_align_device_hook_on_blocks() if self.patch_offload else nullcontext()
         model_dir = self.model_info.model_dir
         with patch_get_dynamic_module(), patch_tp_plan(self.load_model), patch_offload_context:
@@ -589,6 +599,9 @@ def get_model_processor(
         >>> # Load only processor without model
         >>> _, processor = get_model_processor('Qwen/Qwen2.5-7B-Instruct', load_model=False)
     """
+    # [新手导读] 模型加载的对外总入口（训练管线 _prepare_model_tokenizer 最终调到这里）。
+    # 两步走：① get_model_info_meta 识别模型类型并下载（见 model_meta.py）；
+    #         ② 用 ModelMeta 中注册的 loader 类真正加载模型与 processor。
     if load_model:
         patch_mp_ddp()
     if model_kwargs is None:
