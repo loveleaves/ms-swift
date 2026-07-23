@@ -1,0 +1,50 @@
+<svg viewBox="0 0 1000 400" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif">
+  <rect width="1000" height="400" fill="#ffffff"/>
+  <text x="500" y="34" text-anchor="middle" font-size="20" font-weight="bold" fill="#1e293b">全参数微调 vs 参数高效微调（PEFT）显存构成对比</text>
+
+  <!-- Full FT column -->
+  <text x="230" y="66" text-anchor="middle" font-size="15" font-weight="bold" fill="#1e293b">全参数微调 (Full FT)</text>
+  <g>
+    <rect x="120" y="80" width="220" height="60" fill="#93c5fd" stroke="#3b82f6"/>
+    <text x="230" y="115" text-anchor="middle" font-size="13" fill="#1e3a8a">模型权重（全部可训练）</text>
+
+    <rect x="120" y="140" width="220" height="90" fill="#fca5a5" stroke="#ef4444"/>
+    <text x="230" y="180" text-anchor="middle" font-size="13" fill="#7f1d1d">优化器状态</text>
+    <text x="230" y="200" text-anchor="middle" font-size="11.5" fill="#7f1d1d">(一阶+二阶动量, 全部参数)</text>
+
+    <rect x="120" y="230" width="220" height="60" fill="#fdba74" stroke="#f97316"/>
+    <text x="230" y="265" text-anchor="middle" font-size="13" fill="#7c2d12">梯度（全部参数）</text>
+
+    <rect x="120" y="290" width="220" height="50" fill="#d8b4fe" stroke="#a855f7"/>
+    <text x="230" y="320" text-anchor="middle" font-size="13" fill="#581c87">激活值</text>
+  </g>
+  <text x="230" y="366" text-anchor="middle" font-size="12.5" fill="#475569">显存 ≈ 16~20 bytes/参数</text>
+  <text x="230" y="384" text-anchor="middle" font-size="12" fill="#94a3b8">7B 模型理论需求可达 100GB+</text>
+
+  <!-- divider -->
+  <line x1="500" y1="60" x2="500" y2="360" stroke="#e2e8f0" stroke-width="2" stroke-dasharray="6,4"/>
+
+  <!-- LoRA column -->
+  <text x="770" y="66" text-anchor="middle" font-size="15" font-weight="bold" fill="#1e293b">LoRA 等 PEFT（冻结基座）</text>
+  <g>
+    <rect x="660" y="80" width="220" height="60" fill="#93c5fd" stroke="#3b82f6" opacity="0.55"/>
+    <text x="770" y="108" text-anchor="middle" font-size="13" fill="#1e3a8a">模型权重（冻结，不更新）</text>
+    <text x="770" y="126" text-anchor="middle" font-size="11" fill="#1e3a8a">可选量化压缩 (QLoRA)</text>
+
+    <rect x="660" y="150" width="220" height="24" fill="#86efac" stroke="#22c55e"/>
+    <text x="770" y="167" text-anchor="middle" font-size="11.5" fill="#14532d">LoRA 分支 A/B（新增，仅0.1%~5%）</text>
+
+    <rect x="660" y="180" width="220" height="24" fill="#fca5a5" stroke="#ef4444"/>
+    <text x="770" y="197" text-anchor="middle" font-size="11.5" fill="#7f1d1d">优化器状态（仅LoRA参数）</text>
+
+    <rect x="660" y="210" width="220" height="20" fill="#fdba74" stroke="#f97316"/>
+    <text x="770" y="224" text-anchor="middle" font-size="11" fill="#7c2d12">梯度（仅LoRA参数）</text>
+
+    <rect x="660" y="236" width="220" height="104" fill="#d8b4fe" stroke="#a855f7"/>
+    <text x="770" y="270" text-anchor="middle" font-size="13" fill="#581c87">激活值</text>
+    <text x="770" y="292" text-anchor="middle" font-size="11" fill="#581c87">（反向传播仍需流经冻结层，</text>
+    <text x="770" y="308" text-anchor="middle" font-size="11" fill="#581c87">此部分开销不因PEFT而减少）</text>
+  </g>
+  <text x="770" y="366" text-anchor="middle" font-size="12.5" fill="#475569">优化器状态+梯度显存降低一个数量级以上</text>
+  <text x="770" y="384" text-anchor="middle" font-size="12" fill="#94a3b8">7B 模型 QLoRA 可在单卡 24GB 内训练</text>
+</svg>

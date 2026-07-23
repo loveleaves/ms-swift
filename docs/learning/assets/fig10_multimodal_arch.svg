@@ -1,0 +1,54 @@
+<svg viewBox="0 0 1000 380" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif">
+  <defs>
+    <marker id="arrow10" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#64748b"/>
+    </marker>
+  </defs>
+  <rect width="1000" height="380" fill="#ffffff"/>
+  <text x="500" y="32" text-anchor="middle" font-size="20" font-weight="bold" fill="#1e293b">多模态大模型（MLLM）架构与 ms-swift 分模块训练控制</text>
+
+  <!-- image input -->
+  <rect x="40" y="150" width="80" height="60" rx="6" fill="#f1f5f9" stroke="#94a3b8"/>
+  <text x="80" y="184" text-anchor="middle" font-size="12" fill="#475569">图像/视频</text>
+
+  <!-- ViT -->
+  <rect x="170" y="110" width="180" height="140" rx="10" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+  <text x="260" y="140" text-anchor="middle" font-size="14" font-weight="bold" fill="#1d4ed8">视觉编码器 ViT</text>
+  <text x="260" y="164" text-anchor="middle" font-size="11.5" fill="#1e3a8a">来自大规模图文对比学习</text>
+  <text x="260" y="182" text-anchor="middle" font-size="11.5" fill="#1e3a8a">预训练（如CLIP/SigLIP）</text>
+  <rect x="190" y="200" width="140" height="34" rx="6" fill="#eff6ff" stroke="#60a5fa"/>
+  <text x="260" y="222" text-anchor="middle" font-size="11.5" fill="#1d4ed8" font-family="monospace">--freeze_vit true(默认)</text>
+  <text x="260" y="246" text-anchor="middle" font-size="11" fill="#3b82f6" font-family="monospace">--vit_lr（小学习率）</text>
+
+  <!-- Aligner -->
+  <rect x="400" y="130" width="160" height="100" rx="10" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+  <text x="480" y="158" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#92400e">对齐模块 Aligner</text>
+  <text x="480" y="178" text-anchor="middle" font-size="11" fill="#78350f">MLP / Q-Former / Resampler</text>
+  <rect x="415" y="188" width="130" height="30" rx="6" fill="#fffbeb" stroke="#fbbf24"/>
+  <text x="480" y="207" text-anchor="middle" font-size="10.5" fill="#92400e" font-family="monospace">--freeze_aligner</text>
+
+  <text x="480" y="248" text-anchor="middle" font-size="10.5" fill="#b45309" font-family="monospace">--aligner_lr（较大）</text>
+
+  <!-- LLM backbone -->
+  <rect x="600" y="90" width="220" height="180" rx="10" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+  <text x="710" y="120" text-anchor="middle" font-size="14" font-weight="bold" fill="#15803d">语言模型主干 LLM</text>
+  <text x="710" y="142" text-anchor="middle" font-size="11.5" fill="#14532d">纯文本预训练得到</text>
+  <rect x="620" y="156" width="180" height="30" rx="6" fill="#f0fdf4" stroke="#4ade80"/>
+  <text x="710" y="175" text-anchor="middle" font-size="11" fill="#15803d" font-family="monospace">--learning_rate（主学习率）</text>
+  <text x="710" y="200" text-anchor="middle" font-size="11.5" fill="#14532d">SFT阶段需较充分更新</text>
+  <text x="710" y="220" text-anchor="middle" font-size="11.5" fill="#14532d">以适配新任务/对话格式</text>
+  <rect x="620" y="232" width="180" height="26" rx="6" fill="#f0fdf4" stroke="#4ade80"/>
+  <text x="710" y="250" text-anchor="middle" font-size="10.5" fill="#166534" font-family="monospace">支持 LoRA / 全参数</text>
+
+  <!-- text input -->
+  <rect x="600" y="290" width="220" height="40" rx="6" fill="#f1f5f9" stroke="#94a3b8"/>
+  <text x="710" y="315" text-anchor="middle" font-size="12" fill="#475569">system / user 文本 messages</text>
+  <line x1="710" y1="290" x2="710" y2="270" stroke="#64748b" stroke-width="2" marker-end="url(#arrow10)"/>
+
+  <!-- arrows -->
+  <line x1="120" y1="180" x2="166" y2="180" stroke="#64748b" stroke-width="2" marker-end="url(#arrow10)"/>
+  <line x1="350" y1="180" x2="396" y2="180" stroke="#64748b" stroke-width="2" marker-end="url(#arrow10)"/>
+  <line x1="560" y1="180" x2="596" y2="180" stroke="#64748b" stroke-width="2" marker-end="url(#arrow10)"/>
+
+  <text x="500" y="352" text-anchor="middle" font-size="12.5" fill="#475569">三部分对学习率/是否冻结的敏感度不同 ⇒ 必须分模块独立配置，不能"一刀切"，否则易破坏视觉特征或欠拟合语言任务</text>
+</svg>

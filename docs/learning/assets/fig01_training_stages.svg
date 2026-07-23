@@ -1,0 +1,46 @@
+<svg viewBox="0 0 1000 420" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif">
+  <defs>
+    <marker id="arrow1" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#64748b"/>
+    </marker>
+  </defs>
+  <rect width="1000" height="420" fill="#ffffff"/>
+  <text x="500" y="36" text-anchor="middle" font-size="22" font-weight="bold" fill="#1e293b">大模型三段式训练范式</text>
+
+  <!-- Stage 1 -->
+  <rect x="40" y="90" width="260" height="180" rx="14" fill="#eff6ff" stroke="#3b82f6" stroke-width="2"/>
+  <text x="170" y="122" text-anchor="middle" font-size="17" font-weight="bold" fill="#1d4ed8">① 预训练 CPT</text>
+  <text x="170" y="150" text-anchor="middle" font-size="13" fill="#334155">海量无标注文本</text>
+  <text x="170" y="172" text-anchor="middle" font-size="13" fill="#334155">自回归语言建模</text>
+  <text x="170" y="194" text-anchor="middle" font-size="13" fill="#334155">损失: 全序列 NLL</text>
+  <text x="170" y="222" text-anchor="middle" font-size="13" fill="#0f172a" font-weight="bold">产物: Base 模型</text>
+  <text x="170" y="244" text-anchor="middle" font-size="12" fill="#64748b">（续写强，难遵循指令）</text>
+
+  <!-- Stage 2 -->
+  <rect x="370" y="90" width="260" height="180" rx="14" fill="#f0fdf4" stroke="#16a34a" stroke-width="2"/>
+  <text x="500" y="122" text-anchor="middle" font-size="17" font-weight="bold" fill="#15803d">② 有监督微调 SFT</text>
+  <text x="500" y="150" text-anchor="middle" font-size="13" fill="#334155">指令-回复 标注数据</text>
+  <text x="500" y="172" text-anchor="middle" font-size="13" fill="#334155">仅在回复区间计算损失</text>
+  <text x="500" y="194" text-anchor="middle" font-size="13" fill="#334155">（Loss Mask）</text>
+  <text x="500" y="222" text-anchor="middle" font-size="13" fill="#0f172a" font-weight="bold">产物: Chat 模型</text>
+  <text x="500" y="244" text-anchor="middle" font-size="12" fill="#64748b">（学会格式与行为对齐）</text>
+
+  <!-- Stage 3 -->
+  <rect x="700" y="90" width="260" height="180" rx="14" fill="#fdf4ff" stroke="#a855f7" stroke-width="2"/>
+  <text x="830" y="122" text-anchor="middle" font-size="17" font-weight="bold" fill="#7e22ce">③ 偏好对齐</text>
+  <text x="830" y="150" text-anchor="middle" font-size="13" fill="#334155">DPO / GRPO / RLHF</text>
+  <text x="830" y="172" text-anchor="middle" font-size="13" fill="#334155">偏好对比 / 可验证奖励</text>
+  <text x="830" y="194" text-anchor="middle" font-size="13" fill="#334155">策略梯度 / 对比损失</text>
+  <text x="830" y="222" text-anchor="middle" font-size="13" fill="#0f172a" font-weight="bold">产物: 对齐模型</text>
+  <text x="830" y="244" text-anchor="middle" font-size="12" fill="#64748b">（更安全、更有用、更会推理）</text>
+
+  <!-- arrows -->
+  <line x1="300" y1="180" x2="365" y2="180" stroke="#64748b" stroke-width="2.5" marker-end="url(#arrow1)"/>
+  <line x1="630" y1="180" x2="695" y2="180" stroke="#64748b" stroke-width="2.5" marker-end="url(#arrow1)"/>
+
+  <!-- feedback loop -->
+  <path d="M 830 270 C 830 330, 500 340, 500 270" fill="none" stroke="#f59e0b" stroke-width="2" stroke-dasharray="6,4" marker-end="url(#arrow1)"/>
+  <text x="665" y="352" text-anchor="middle" font-size="12" fill="#b45309">RL 采样结果拒绝采样后回流为二次 SFT 数据（冷启动/固化）</text>
+
+  <text x="500" y="400" text-anchor="middle" font-size="12.5" fill="#475569">预训练决定能力上限 · SFT 对齐输出格式与行为 · 偏好对齐矫正细粒度质量与推理深度</text>
+</svg>

@@ -1,0 +1,69 @@
+<svg viewBox="0 0 1000 620" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif">
+  <defs>
+    <marker id="arrow8" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#64748b"/>
+    </marker>
+  </defs>
+  <rect width="1000" height="620" fill="#ffffff"/>
+  <text x="500" y="32" text-anchor="middle" font-size="20" font-weight="bold" fill="#1e293b">ms-swift：从 `swift sft` 到 trainer.train() 的调用链路</text>
+
+  <!-- step boxes -->
+  <g font-size="13">
+    <rect x="280" y="56" width="440" height="46" rx="8" fill="#f1f5f9" stroke="#64748b" stroke-width="1.5"/>
+    <text x="500" y="84" text-anchor="middle" fill="#1e293b" font-family="monospace">① swift sft --model ... --train_type lora ...</text>
+
+    <rect x="280" y="120" width="440" height="46" rx="8" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+    <text x="500" y="148" text-anchor="middle" fill="#1d4ed8" font-family="monospace">② swift/cli/sft.py  → 解析参数并转发</text>
+
+    <rect x="280" y="184" width="440" height="46" rx="8" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+    <text x="500" y="212" text-anchor="middle" fill="#1d4ed8" font-family="monospace">③ sft_main() → TrainArguments 解析</text>
+
+    <rect x="230" y="248" width="540" height="46" rx="8" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.5"/>
+    <text x="500" y="276" text-anchor="middle" fill="#15803d" font-family="monospace">④ SwiftSft(args).main()  [SwiftPipeline + TunerMixin]</text>
+
+    <rect x="120" y="312" width="220" height="150" rx="8" fill="#fff7ed" stroke="#fb923c" stroke-width="1.5"/>
+    <text x="230" y="336" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#c2410c">加载与准备</text>
+    <text x="140" y="358" font-size="11.5" fill="#7c2d12">• 加载 tokenizer/模型</text>
+    <text x="140" y="376" font-size="11.5" fill="#7c2d12">• 自动匹配 Template</text>
+    <text x="140" y="394" font-size="11.5" fill="#7c2d12">• Swift.prepare_model()</text>
+    <text x="140" y="412" font-size="11.5" fill="#7c2d12">  注入 Tuner→SwiftModel</text>
+    <text x="140" y="430" font-size="11.5" fill="#7c2d12">• 数据集加载/预处理</text>
+    <text x="140" y="448" font-size="11.5" fill="#7c2d12">  (messages→encode→Packing)</text>
+
+    <rect x="390" y="312" width="220" height="150" rx="8" fill="#fdf4ff" stroke="#a855f7" stroke-width="1.5"/>
+    <text x="500" y="336" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#7e22ce">构造训练组件</text>
+    <text x="410" y="358" font-size="11.5" fill="#581c87">• DataCollator</text>
+    <text x="410" y="376" font-size="11.5" fill="#581c87">  (batch内padding对齐)</text>
+    <text x="410" y="398" font-size="11.5" fill="#581c87">• Trainer 构造</text>
+    <text x="410" y="416" font-size="11.5" fill="#581c87">  (Seq2SeqTrainer 封装</text>
+    <text x="410" y="434" font-size="11.5" fill="#581c87">  + TrainerMixin 混入</text>
+    <text x="410" y="452" font-size="11.5" fill="#581c87">  loss_scale/日志/保存逻辑)</text>
+
+    <rect x="660" y="312" width="220" height="150" rx="8" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+    <text x="770" y="336" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#1d4ed8">self.run()</text>
+    <text x="680" y="358" font-size="11.5" fill="#1e3a8a">→ self.train(trainer)</text>
+    <text x="680" y="380" font-size="11.5" fill="#1e3a8a">→ trainer.train(</text>
+    <text x="680" y="398" font-size="11.5" fill="#1e3a8a">   resume_from_checkpoint)</text>
+    <text x="680" y="424" font-size="11.5" fill="#1e3a8a">HF Transformers 标准</text>
+    <text x="680" y="442" font-size="11.5" fill="#1e3a8a">训练循环开始执行</text>
+
+    <rect x="230" y="486" width="540" height="90" rx="8" fill="#fee2e2" stroke="#ef4444" stroke-width="1.5"/>
+    <text x="500" y="510" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#b91c1c">⑤ 训练循环 (每个 step)</text>
+    <text x="250" y="532" font-size="11.5" fill="#7f1d1d">outputs = model(**batch)  →  loss = outputs.loss（应用 loss_scale 加权）</text>
+    <text x="250" y="552" font-size="11.5" fill="#7f1d1d">loss.backward()（DeepSpeed/FSDP协同）  →  optimizer.step(); scheduler.step()</text>
+    <text x="250" y="570" font-size="11.5" fill="#7f1d1d">周期性触发 evaluate() / save_checkpoint()（依据 eval_steps / save_steps）</text>
+  </g>
+
+  <!-- arrows -->
+  <g stroke="#64748b" stroke-width="2" marker-end="url(#arrow8)">
+    <line x1="500" y1="102" x2="500" y2="118"/>
+    <line x1="500" y1="166" x2="500" y2="182"/>
+    <line x1="500" y1="230" x2="500" y2="246"/>
+    <line x1="350" y1="294" x2="260" y2="310"/>
+    <line x1="500" y1="294" x2="500" y2="310"/>
+    <line x1="650" y1="294" x2="740" y2="310"/>
+    <line x1="230" y1="462" x2="380" y2="484"/>
+    <line x1="500" y1="462" x2="500" y2="484"/>
+    <line x1="770" y1="462" x2="620" y2="484"/>
+  </g>
+</svg>

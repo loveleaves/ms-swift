@@ -1,0 +1,41 @@
+<svg viewBox="0 0 1040 300" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif">
+  <defs>
+    <marker id="arrow11" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#64748b"/>
+    </marker>
+  </defs>
+  <rect width="1040" height="300" fill="#ffffff"/>
+  <text x="520" y="32" text-anchor="middle" font-size="20" font-weight="bold" fill="#1e293b">推理模型典型训练流程：SFT 冷启动 → RL → 二次 SFT</text>
+
+  <rect x="30" y="90" width="180" height="90" rx="10" fill="#e2e8f0" stroke="#64748b" stroke-width="2"/>
+  <text x="120" y="122" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#1e293b">Base 模型</text>
+  <text x="120" y="146" text-anchor="middle" font-size="11" fill="#475569">预训练产物</text>
+  <text x="120" y="164" text-anchor="middle" font-size="11" fill="#475569">不擅长遵循指令</text>
+
+  <line x1="210" y1="135" x2="260" y2="135" stroke="#64748b" stroke-width="2.5" marker-end="url(#arrow11)"/>
+
+  <rect x="260" y="90" width="200" height="90" rx="10" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+  <text x="360" y="118" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#1d4ed8">① SFT 冷启动</text>
+  <text x="360" y="140" text-anchor="middle" font-size="11" fill="#1e3a8a">少量高质量思维链数据</text>
+  <text x="360" y="158" text-anchor="middle" font-size="11" fill="#1e3a8a">学会输出格式与思考模式</text>
+
+  <line x1="460" y1="135" x2="510" y2="135" stroke="#64748b" stroke-width="2.5" marker-end="url(#arrow11)"/>
+
+  <rect x="510" y="90" width="220" height="90" rx="10" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+  <text x="620" y="118" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#15803d">② 强化学习 (GRPO)</text>
+  <text x="620" y="140" text-anchor="middle" font-size="11" fill="#14532d">可验证奖励(数学/代码)</text>
+  <text x="620" y="158" text-anchor="middle" font-size="11" fill="#14532d">大幅提升推理深度</text>
+
+  <line x1="730" y1="135" x2="780" y2="135" stroke="#64748b" stroke-width="2.5" marker-end="url(#arrow11)"/>
+
+  <rect x="780" y="90" width="220" height="90" rx="10" fill="#fdf4ff" stroke="#a855f7" stroke-width="2"/>
+  <text x="890" y="118" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#7e22ce">③ 拒绝采样二次 SFT</text>
+  <text x="890" y="140" text-anchor="middle" font-size="11" fill="#581c87">筛选RL高质量采样结果</text>
+  <text x="890" y="158" text-anchor="middle" font-size="11" fill="#581c87">修正格式/语言混杂，固化能力</text>
+
+  <!-- loop back -->
+  <path d="M 890 180 C 890 240, 360 240, 360 180" fill="none" stroke="#f59e0b" stroke-width="2" stroke-dasharray="6,4" marker-end="url(#arrow11)"/>
+  <text x="620" y="262" text-anchor="middle" font-size="12" fill="#b45309">可迭代多轮：SFT ⇄ RL 反复循环，逐步逼近目标能力</text>
+
+  <text x="520" y="20" text-anchor="middle" font-size="1" fill="none"> </text>
+</svg>

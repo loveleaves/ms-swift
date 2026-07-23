@@ -1,0 +1,63 @@
+<svg viewBox="0 0 1040 420" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif">
+  <rect width="1040" height="420" fill="#ffffff"/>
+  <text x="520" y="32" text-anchor="middle" font-size="20" font-weight="bold" fill="#1e293b">DeepSpeed ZeRO 各阶段显存切分对比（4 张 GPU 示意）</text>
+
+  <!-- Baseline DP -->
+  <text x="130" y="66" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#1e293b">朴素数据并行</text>
+  <g font-size="10.5">
+    <rect x="50" y="78" width="55" height="150" fill="#93c5fd" stroke="#3b82f6"/>
+    <rect x="110" y="78" width="55" height="150" fill="#93c5fd" stroke="#3b82f6"/>
+    <rect x="170" y="78" width="55" height="150" fill="#93c5fd" stroke="#3b82f6"/>
+    <rect x="230" y="78" width="55" height="150" fill="#93c5fd" stroke="#3b82f6"/>
+  </g>
+  <text x="130" y="248" text-anchor="middle" font-size="11" fill="#475569">每卡完整冗余：参数+梯度+优化器状态</text>
+
+  <!-- ZeRO-1 -->
+  <text x="400" y="66" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#1e293b">ZeRO-1</text>
+  <g font-size="10.5">
+    <rect x="320" y="78" width="55" height="60" fill="#93c5fd" stroke="#3b82f6"/>
+    <rect x="380" y="78" width="55" height="60" fill="#93c5fd" stroke="#3b82f6"/>
+    <rect x="440" y="78" width="55" height="60" fill="#93c5fd" stroke="#3b82f6"/>
+    <rect x="500" y="78" width="55" height="60" fill="#93c5fd" stroke="#3b82f6"/>
+    <rect x="320" y="140" width="55" height="40" fill="#fdba74" stroke="#f97316"/>
+    <rect x="380" y="140" width="55" height="40" fill="#fdba74" stroke="#f97316"/>
+    <rect x="440" y="140" width="55" height="40" fill="#fdba74" stroke="#f97316"/>
+    <rect x="500" y="140" width="55" height="40" fill="#fdba74" stroke="#f97316"/>
+    <rect x="320" y="182" width="235" height="46" fill="#fca5a5" stroke="#ef4444"/>
+    <text x="437" y="209" text-anchor="middle" font-size="10.5" fill="#7f1d1d">优化器状态切分 1/N</text>
+  </g>
+  <text x="437" y="248" text-anchor="middle" font-size="11" fill="#475569">参数/梯度仍冗余，优化器状态切分</text>
+
+  <!-- ZeRO-2 -->
+  <text x="700" y="66" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#1e293b">ZeRO-2</text>
+  <g font-size="10.5">
+    <rect x="620" y="78" width="55" height="60" fill="#93c5fd" stroke="#3b82f6"/>
+    <rect x="680" y="78" width="55" height="60" fill="#93c5fd" stroke="#3b82f6"/>
+    <rect x="740" y="78" width="55" height="60" fill="#93c5fd" stroke="#3b82f6"/>
+    <rect x="800" y="78" width="55" height="60" fill="#93c5fd" stroke="#3b82f6"/>
+    <rect x="620" y="140" width="235" height="40" fill="#fdba74" stroke="#f97316"/>
+    <text x="737" y="164" text-anchor="middle" font-size="10.5" fill="#7c2d12">梯度切分 1/N</text>
+    <rect x="620" y="182" width="235" height="46" fill="#fca5a5" stroke="#ef4444"/>
+    <text x="737" y="209" text-anchor="middle" font-size="10.5" fill="#7f1d1d">优化器状态切分 1/N</text>
+  </g>
+  <text x="737" y="248" text-anchor="middle" font-size="11" fill="#475569">参数仍冗余，梯度+优化器状态切分</text>
+
+  <!-- ZeRO-3 -->
+  <text x="965" y="66" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#1e293b">ZeRO-3</text>
+  <g font-size="10.5">
+    <rect x="920" y="78" width="235" height="46" fill="#93c5fd" stroke="#3b82f6"/>
+    <text x="1037" y="105" text-anchor="middle" font-size="10.5" fill="#1e3a8a">参数切分 1/N</text>
+    <rect x="920" y="130" width="235" height="46" fill="#fdba74" stroke="#f97316"/>
+    <text x="1037" y="157" text-anchor="middle" font-size="10.5" fill="#7c2d12">梯度切分 1/N</text>
+    <rect x="920" y="182" width="235" height="46" fill="#fca5a5" stroke="#ef4444"/>
+    <text x="1037" y="209" text-anchor="middle" font-size="10.5" fill="#7f1d1d">优化器状态切分 1/N</text>
+  </g>
+  <text x="1037" y="248" text-anchor="middle" font-size="11" fill="#475569">参数/梯度/优化器状态全切分</text>
+
+  <!-- summary -->
+  <rect x="50" y="290" width="940" height="106" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="520" y="316" text-anchor="middle" font-size="13" font-weight="bold" fill="#1e293b">显存效率 ↑ 但通信开销 ↑：ZeRO-1 &lt; ZeRO-2 &lt; ZeRO-3 &lt; ZeRO-3+Offload</text>
+  <text x="520" y="342" text-anchor="middle" font-size="12.5" fill="#475569">ms-swift 命令行：--deepspeed zero1 / zero2 / zero3 / zero2_offload / zero3_offload</text>
+  <text x="520" y="366" text-anchor="middle" font-size="12" fill="#64748b">工程经验：能不 Offload 就不 Offload；显存不足时按 ZeRO-2 → ZeRO-3 → ZeRO-3+Offload 阶梯式升级</text>
+  <text x="520" y="386" text-anchor="middle" font-size="12" fill="#64748b">PyTorch 原生 FSDP 的 FULL_SHARD 策略与 ZeRO-3 思路等价，是同一核心思想的另一套工程实现</text>
+</svg>

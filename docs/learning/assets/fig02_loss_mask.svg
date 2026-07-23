@@ -1,0 +1,71 @@
+<svg viewBox="0 0 1000 360" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif">
+  <rect width="1000" height="360" fill="#ffffff"/>
+  <text x="500" y="34" text-anchor="middle" font-size="20" font-weight="bold" fill="#1e293b">SFT 的核心细节：损失掩码（Loss Mask）</text>
+  <text x="500" y="56" text-anchor="middle" font-size="13" fill="#64748b">只在 assistant 回复的 token 上计算交叉熵损失，其余 token 仅作为条件上下文</text>
+
+  <!-- token row background -->
+  <g>
+    <!-- system -->
+    <rect x="40" y="100" width="120" height="48" fill="#e2e8f0" stroke="#94a3b8"/>
+    <text x="100" y="128" text-anchor="middle" font-size="12" fill="#334155">system 提示</text>
+
+    <!-- user1 -->
+    <rect x="160" y="100" width="150" height="48" fill="#dbeafe" stroke="#60a5fa"/>
+    <text x="235" y="128" text-anchor="middle" font-size="12" fill="#1d4ed8">user: 问题①</text>
+
+    <!-- assistant1 -->
+    <rect x="310" y="100" width="180" height="48" fill="#bbf7d0" stroke="#22c55e"/>
+    <text x="400" y="128" text-anchor="middle" font-size="12" fill="#15803d">assistant: 回复①</text>
+
+    <!-- user2 -->
+    <rect x="490" y="100" width="150" height="48" fill="#dbeafe" stroke="#60a5fa"/>
+    <text x="565" y="128" text-anchor="middle" font-size="12" fill="#1d4ed8">user: 问题②</text>
+
+    <!-- assistant2 -->
+    <rect x="640" y="100" width="180" height="48" fill="#bbf7d0" stroke="#22c55e"/>
+    <text x="730" y="128" text-anchor="middle" font-size="12" fill="#15803d">assistant: 回复②</text>
+
+    <!-- pad -->
+    <rect x="820" y="100" width="100" height="48" fill="#f1f5f9" stroke="#cbd5e1" stroke-dasharray="4,3"/>
+    <text x="870" y="128" text-anchor="middle" font-size="12" fill="#94a3b8">padding</text>
+  </g>
+
+  <!-- mask row -->
+  <g>
+    <rect x="40" y="180" width="120" height="40" fill="#fee2e2" stroke="#f87171"/>
+    <text x="100" y="204" text-anchor="middle" font-size="13" font-weight="bold" fill="#b91c1c">mask = 0</text>
+
+    <rect x="160" y="180" width="150" height="40" fill="#fee2e2" stroke="#f87171"/>
+    <text x="235" y="204" text-anchor="middle" font-size="13" font-weight="bold" fill="#b91c1c">mask = 0</text>
+
+    <rect x="310" y="180" width="180" height="40" fill="#dcfce7" stroke="#4ade80"/>
+    <text x="400" y="204" text-anchor="middle" font-size="13" font-weight="bold" fill="#166534">mask = 1（计算损失）</text>
+
+    <rect x="490" y="180" width="150" height="40" fill="#fee2e2" stroke="#f87171"/>
+    <text x="565" y="204" text-anchor="middle" font-size="13" font-weight="bold" fill="#b91c1c">mask = 0</text>
+
+    <rect x="640" y="180" width="180" height="40" fill="#dcfce7" stroke="#4ade80"/>
+    <text x="730" y="204" text-anchor="middle" font-size="13" font-weight="bold" fill="#166534">mask = 1（计算损失）</text>
+
+    <rect x="820" y="180" width="100" height="40" fill="#fee2e2" stroke="#f87171"/>
+    <text x="870" y="204" text-anchor="middle" font-size="13" font-weight="bold" fill="#b91c1c">mask = 0</text>
+  </g>
+
+  <!-- connecting lines -->
+  <g stroke="#cbd5e1" stroke-width="1">
+    <line x1="100" y1="148" x2="100" y2="180"/>
+    <line x1="235" y1="148" x2="235" y2="180"/>
+    <line x1="400" y1="148" x2="400" y2="180"/>
+    <line x1="565" y1="148" x2="565" y2="180"/>
+    <line x1="730" y1="148" x2="730" y2="180"/>
+    <line x1="870" y1="148" x2="870" y2="180"/>
+  </g>
+
+  <text x="500" y="256" text-anchor="middle" font-size="12.5" fill="#475569">labels = input_ids （mask=1 区间）；labels = -100 （mask=0 区间，PyTorch 交叉熵默认忽略该位置）</text>
+  <text x="500" y="280" text-anchor="middle" font-size="12.5" fill="#475569">loss_scale 插件可将 0/1 掩码推广为连续权重，如对 Agent 工具调用参数区间加权、对空思维链样本置零</text>
+
+  <rect x="60" y="306" width="16" height="16" fill="#dcfce7" stroke="#4ade80"/>
+  <text x="84" y="319" font-size="12" fill="#334155">参与损失计算（assistant 回复）</text>
+  <rect x="340" y="306" width="16" height="16" fill="#fee2e2" stroke="#f87171"/>
+  <text x="364" y="319" font-size="12" fill="#334155">仅作条件上下文，不参与损失（system/user/padding）</text>
+</svg>

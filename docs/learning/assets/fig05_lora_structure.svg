@@ -1,0 +1,59 @@
+<svg viewBox="0 0 1000 400" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif">
+  <rect width="1000" height="400" fill="#ffffff"/>
+  <text x="500" y="34" text-anchor="middle" font-size="20" font-weight="bold" fill="#1e293b">LoRA：低秩增量分解结构</text>
+
+  <!-- input x -->
+  <text x="70" y="215" text-anchor="middle" font-size="16" fill="#334155">x</text>
+  <line x1="90" y1="210" x2="150" y2="210" stroke="#64748b" stroke-width="2"/>
+
+  <!-- W0 frozen path -->
+  <rect x="150" y="110" width="170" height="90" rx="8" fill="#e2e8f0" stroke="#64748b" stroke-width="2"/>
+  <text x="235" y="148" text-anchor="middle" font-size="15" font-weight="bold" fill="#1e293b">W₀</text>
+  <text x="235" y="170" text-anchor="middle" font-size="11.5" fill="#475569">冻结的预训练权重</text>
+  <text x="235" y="186" text-anchor="middle" font-size="11" fill="#94a3b8">d × k，不参与梯度更新</text>
+  <line x1="90" y1="210" x2="150" y2="155" stroke="#64748b" stroke-width="2"/>
+
+  <!-- LoRA branch A,B -->
+  <rect x="150" y="250" width="90" height="90" rx="8" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+  <text x="195" y="290" text-anchor="middle" font-size="17" font-weight="bold" fill="#1d4ed8">A</text>
+  <text x="195" y="310" text-anchor="middle" font-size="11" fill="#1e3a8a">r × k</text>
+  <text x="195" y="326" text-anchor="middle" font-size="10.5" fill="#3b82f6">高斯随机初始化</text>
+
+  <rect x="280" y="250" width="90" height="90" rx="8" fill="#bbf7d0" stroke="#22c55e" stroke-width="2"/>
+  <text x="325" y="290" text-anchor="middle" font-size="17" font-weight="bold" fill="#15803d">B</text>
+  <text x="325" y="310" text-anchor="middle" font-size="11" fill="#14532d">d × r</text>
+  <text x="325" y="326" text-anchor="middle" font-size="10.5" fill="#22c55e">初始化为全零</text>
+
+  <line x1="90" y1="210" x2="150" y2="295" stroke="#64748b" stroke-width="2"/>
+  <line x1="240" y1="295" x2="280" y2="295" stroke="#64748b" stroke-width="2"/>
+
+  <!-- alpha/r scale -->
+  <rect x="400" y="262" width="90" height="66" rx="8" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+  <text x="445" y="290" text-anchor="middle" font-size="13" font-weight="bold" fill="#92400e">α / r</text>
+  <text x="445" y="308" text-anchor="middle" font-size="10.5" fill="#b45309">缩放因子</text>
+  <line x1="370" y1="295" x2="400" y2="295" stroke="#64748b" stroke-width="2"/>
+
+  <!-- sum node -->
+  <circle cx="580" cy="210" r="26" fill="#ffffff" stroke="#1e293b" stroke-width="2.5"/>
+  <text x="580" y="218" text-anchor="middle" font-size="22" fill="#1e293b">+</text>
+
+  <line x1="320" y1="200" x2="580" y2="200" stroke="#64748b" stroke-width="2"/>
+  <line x1="580" y1="200" x2="580" y2="200" stroke="#64748b" stroke-width="2"/>
+  <line x1="490" y1="295" x2="580" y2="230" stroke="#64748b" stroke-width="2"/>
+
+  <!-- output -->
+  <line x1="606" y1="210" x2="660" y2="210" stroke="#64748b" stroke-width="2.5"/>
+  <text x="700" y="216" text-anchor="middle" font-size="15" fill="#334155">h</text>
+
+  <!-- formula box -->
+  <rect x="740" y="120" width="230" height="180" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="855" y="150" text-anchor="middle" font-size="13" font-weight="bold" fill="#1e293b">前向计算</text>
+  <text x="855" y="180" text-anchor="middle" font-size="13" font-family="monospace" fill="#334155">h = W₀x + (α/r)·BAx</text>
+  <text x="760" y="212" font-size="11.5" fill="#475569">• r ≪ min(d,k)，可训练参数量</text>
+  <text x="775" y="230" font-size="11.5" fill="#475569">远小于 W₀</text>
+  <text x="760" y="252" font-size="11.5" fill="#475569">• B 初始为零 ⇒ 训练起点</text>
+  <text x="775" y="270" font-size="11.5" fill="#475569">与预训练模型完全一致</text>
+  <text x="760" y="290" font-size="11.5" fill="#475569">• 训练后 W' = W₀ + (α/r)BA 可合并</text>
+
+  <text x="500" y="378" text-anchor="middle" font-size="12.5" fill="#64748b">合并后与原模型结构完全相同 ⇒ 不引入任何推理延迟</text>
+</svg>
