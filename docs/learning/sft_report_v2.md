@@ -17,7 +17,7 @@
 3. **工程层**：以 ModelScope 开源的 ms-swift（Scalable lightWeight Infrastructure for Fine-Tuning）框架为例，深入剖析其命令行体系、参数体系、Template（对话模板）体系、Tuner（微调器）体系、Trainer 体系、数据处理管线（含 Packing 实现）、分布式后端（DeepSpeed/FSDP/Megatron-SWIFT）、多模态训练特化设计、量化训练支持等，力图"从命令行一路追踪到损失函数计算"，把 SFT 的工程实现讲透。
 4. **实践层**：给出可复用的训练配置模板、调参经验、常见故障排查思路，以及 SFT 与 DPO/GRPO/RLHF 等后续对齐技术的关系。
 
-需要说明的是：ms-swift 是一个仍在快速演进的开源项目（本报告调研时其 README 已提及对 Qwen3.6、DeepSeek-V4、GLM-5.1 等"面向未来"的模型系列的支持声明，说明其文档/代码会持续滚动更新），因此报告中涉及的具体参数名、默认值、目录结构均以调研时可获得的公开信息（README、Releases、docs/source_en 文档、CLI 源码片段等）为准，并在正文中标注版本演进痕迹（例如 `--sft_type` 在 3.x 版本中更名为 `--train_type`）。读者在实际使用时，应以自己所用版本的 `swift sft --help` 输出为准。
+需要说明的是：ms-swift 是一个仍在快速演进的开源项目。本报告在初稿完成后，针对读者指出的具体错误（如目录结构描述）做了专项复核修订：截至本次修订调研，ms-swift 已发布 **v4.0.0**（发布计划见官方 Issue #7250 "Welcome ms-swift v4"，原定 2026-03-02 发布，现已正式发布，最新开发版文档显示为 v4.5.0.dev0），v4 版本引入了多项**破坏性重构（Breaking Changes）**，其中与本报告工程解析关系最大的一条是：**原 `swift.llm` 目录已拆分为 `swift.template`、`swift.dataset`、`swift.model`、`swift.pipelines` 四个独立子模块**，同时命令行的微调方式参数已统一收敛为 `--tuner_type`（`--sft_type`/`--train_type` 是 v2.x/v3.x 时期的历史命名）。本报告已据此对正文中涉及目录结构、参数命名、调用链路的表述做了同步修订，并在相应位置标注版本演进背景，但由于该项目仍在持续滚动更新（如近期正在接入 DeepSeek-V3.2、GLM-5.0 等模型），具体细节仍建议读者以自己所用版本的 `swift sft --help` 输出与官方文档为准。
 
 ---
 
@@ -85,6 +85,10 @@
 ### 1.4 本报告的技术调研边界
 
 本报告聚焦 SFT（含其广义外延——预训练与 SFT 共用的工程基础设施），对 RLHF/DPO/GRPO 仅在与 SFT 直接相关（如权重复用、Loss 设计的对比）的范围内展开讨论，不做单独的强化学习算法推导。在框架层面，本报告以 ms-swift 为主要解剖对象，兼顾提及其依赖的上游生态（HuggingFace Transformers/PEFT/TRL、DeepSpeed、PyTorch FSDP、Megatron-LM、vLLM 等），因为 ms-swift 本质上是一个"训练编排与工程封装框架"，其大量核心能力（如具体的 Attention 实现、ZeRO 优化器）来自这些上游依赖，ms-swift 的核心价值在于**统一的命令行/参数体系、丰富的模型与数据集适配（600+ LLM、300+ MLLM）、开箱即用的 Template 与数据处理管线、以及对 CPT/SFT/RLHF/Embedding/Reranker 等多训练范式的统一编排**。
+
+**本次修订说明**：为提升本报告理论部分的准确性与权威性，本次修订专项检索并核实了当前学术界公开发表的 SFT/指令微调相关专业综述论文，包括但不限于：Zhang 等《Instruction Tuning for Large Language Models: A Survey》（arXiv:2308.10792，最新版 v5 更新于 2024 年 12 月，并持续滚动更新配套 GitHub 仓库）、Han 等《Towards Alignment-Centric Paradigm: A Survey of Instruction Tuning in Large Language Models》（arXiv:2508.17184，2025 年 8 月）、Han 等《Parameter-Efficient Fine-Tuning for Large Models: A Comprehensive Survey》（arXiv:2403.14608）、Wang 等《Parameter-Efficient Fine-Tuning in Large Models: A Survey of Methodologies》（arXiv:2410.19878，已发表于 *Artificial Intelligence Review*）、Mao 等《A Survey on LoRA of Large Language Models》（发表于 *Frontiers of Computer Science* 2025）、王嘉豪等《A Survey on Data Selection for LLM Instruction Tuning》（arXiv:2402.05123）、秦煜蕾等《Unleashing the Power of Data Tsunami》（arXiv:2408.02085，*TMLR*）等。这些综述与本报告初稿的核心论述（三阶段训练范式、损失掩码的工程实现、PEFT 四分类框架、LoRA 家族演进脉络等）总体保持一致，本次修订据此在第三章（数据选择方法体系）与第七章（前沿 LoRA 变体速览）新增了两个专门小节，并在附录 B 中补充了完整的综述文献引用，力求让本报告的理论叙述有更扎实的一手文献支撑，而非仅依赖工程博客与框架文档。
+
+**第二轮修订说明**：在前述综述文献核实的基础上，进一步针对 SFT 最常见的 Full（全参数）与 LoRA 两类训练场景，专项核实了 ms-swift 中 `swift/plugin/tuner.py` 的 `Tuner` 抽象基类公开代码片段（`prepare_model`/`save_pretrained` 两个静态方法），据此在第十三章新增 13.3~13.8 六个小节，绘制了两张新的时序/类图（图 13-2 端到端调用链对比时序图、图 13-3 Tuner 策略模式类图），系统梳理了 Full 与 LoRA 两条链路在"参数冻结策略""优化器构造""DeepSpeed 并行协同""Checkpoint 序列化"四个环节的具体分野，并提炼出策略模式（Strategy Pattern）、单一信任源（Single Source of Truth）、最小充分序列化（Minimal Sufficient Serialization）三条贯穿其中的工程设计思想，力求让读者不仅知道"Full 和 LoRA 分别怎么配置参数"，更能理解"框架为何能够以如此精简的核心代码同时支撑二者"。
 
 ---
 
@@ -204,6 +208,24 @@ ms-swift 提供了丰富的 `loss_scale` 策略（在其 `swift/plugin/loss_scal
 - **多模态数据**：`messages` 中的 `content` 字段需要支持图像/视频/音频的混合内容（通常以 `<image>`、`<video>`、`<audio>` 等占位符 + 单独的媒体路径/URL 字段表示），还需要处理图像分辨率（`max_pixels`）、视频抽帧率（`fps`）、多图/多轮图文交织等复杂场景。特别地，在目标检测/视觉定位（Grounding）等任务中，一条数据可能对应"一个物体标签 + 多个边界框（bbox）"，需要在数据格式与 Template 编码逻辑上做专门支持。
 - **Agent/工具调用数据**：需要在 `messages` 中额外支持 `tool`/`function` 角色，表示模型发起的函数调用请求及外部环境返回的调用结果，同时需要在 Prompt 中拼接"工具定义（Tool Schema）"，训练时通常需要对"工具调用参数生成"这部分内容做更严格的格式监督（如前述 loss_scale 加权），因为 JSON 参数哪怕一个字符出错都会导致下游调用失败。
 
+### 3.7 数据选择的量化方法体系（本次修订新增，基于专业综述文献）
+
+第 3.3~3.4 节从方法论层面讨论了数据质量与配比的重要性，本节结合近两年两篇专门针对"指令微调数据选择"的综述——王嘉豪等《A Survey on Data Selection for LLM Instruction Tuning》（arXiv:2402.05123，2024）与秦煜蕾等《Unleashing the Power of Data Tsunami: A Comprehensive Survey on Data Assessment and Selection for Instruction Tuning of Language Models》（arXiv:2408.02085，发表于 *Transactions on Machine Learning Research*）——将"如何从海量候选数据中挑选高质量子集"这一问题的主流量化方法做进一步梳理，为工程实践提供更具体的技术选项：
+
+- **基于规则/统计指标的粗筛（Heuristic-based Filtering）**：包括去重（精确哈希/MinHash）、长度过滤（过短/过长样本剔除）、语言检测、乱码/低质文本检测等，是几乎所有数据流水线的第一道过滤关卡，成本最低但区分度也最粗糙。
+- **基于模型打分的质量评估（Model-based Quality Scoring）**：用一个独立的打分模型（可以是 ChatGPT/GPT-4 等强模型直接打分，如 **AlpaGasus**（Chen et al., 2024）提出用 ChatGPT 对样本做 1-5 分质量评分并只保留高分样本；也可以是专门训练的小型质量分类器）对每条样本给出质量分数，按阈值或排序截断保留头部数据。
+- **基于"指令遵循难度"的选择（Instruction-Following Difficulty, IFD）**：由《From Quantity to Quality》（Li et al., 2024）等工作提出的 **IFD 分数**，其核心思路是比较"模型在有指令条件下生成该回复的困难程度"与"模型在无指令条件下自行续写出类似内容的困难程度"，二者的比值/差值越大，说明这条样本对模型学习"指令的作用"越有信息量，据此可以筛选出真正能够教会模型"遵循指令"而非"单纯背诵回复文本"的高价值样本。
+- **基于梯度影响力的选择（Influence-based Selection）**：以 **LESS**（Xia et al., 2024，*Selecting Influential Data for Targeted Instruction Tuning*）为代表，通过计算候选训练样本的梯度与目标验证任务梯度之间的相似度（借助梯度低秩近似技术降低计算开销），选出对特定下游任务最有"正向影响力"的训练样本子集，这类方法的优势是能够针对性地服务于"面向特定评测目标"的数据选择场景，代价是需要额外的梯度计算开销。
+- **基于多样性的选择（Diversity-based Selection）**：常用 k-means/k-center 等聚类算法在样本的语义 embedding 空间中做覆盖度采样，避免所选子集在语义上高度重复；也有工作使用"数据集覆盖度与深度"（Coverage & Depth）联合指标衡量指令集的任务覆盖广度与单任务难度梯度是否充分。
+- **模型感知的迭代式选择（Model-aware Iterative Selection）**：如 **LEAD**（*Iterative Data Selection for Efficient LLM Instruction Tuning*，2025）等更新的工作指出，静态的一次性数据选择（在训练开始前基于固定指标选定子集）无法适应模型在训练过程中能力的动态变化，提出结合模型当前状态动态调整数据选择策略的迭代式框架，这代表了数据选择方法从"静态离线筛选"向"与训练过程动态耦合"演进的趋势。
+- **指令数据反向生成（Instruction Backtranslation）**：由 Li 等（2024，*Self-Alignment with Instruction Backtranslation*）提出，思路与传统数据构造方向相反——先收集大量高质量的人类书面文本（视为"潜在的高质量回复"），再用模型反向生成与之匹配的指令，相比"先写指令再生成回复"的传统流程，这种方式能够更好地利用互联网上大量存在、但缺乏配对指令的优质文本资源。
+
+这些方法在综述文献中并非相互排斥，实践中往往组合使用（如"规则粗筛 → 多样性采样 → 模型打分精筛"的多级流水线）。需要强调的是，上述量化方法主要服务于"从已有候选池中挑选子集"这一场景，与第 3.2 节讨论的"数据构造/生成"是数据工程流水线中前后衔接、但目标不同的两个环节。
+
+### 3.8 数据长度与训练效果的关系（本次修订新增）
+
+另一个值得工程团队关注的具体发现来自 Zhao 等人的工作《Long is More for Alignment: A Simple but Tough-to-beat Baseline for Instruction Fine-tuning》（arXiv:2402.04833，2024）——该研究发现，**仅从训练集中挑选"回复长度最长"的一小部分样本（如 1000 条）做 SFT，就能在 AlpacaEval 等主流对话质量评测上取得与更复杂的数据选择方法相当、甚至更优的胜率表现**，其背后的原因与"LLM-as-a-Judge"评测范式本身对更详尽、更长回复存在系统性偏好有关（第 19.3 节已提及裁判模型的这类偏见）。这一发现的工程启示具有两面性：一方面，它提示团队"回复长度"可以作为数据筛选的一个简单代理指标纳入多指标筛选流水线（尤其是当筛选目标本身就是"用 LLM-as-a-Judge 类评测衡量的对话质量"时）；但另一方面，它也警示团队**不应将"回复更长"直接等同于"回复质量更高"**，过度依赖长度信号做数据选择或做训练目标优化（如第 20 章讨论的 RL/GRPO 场景中，若奖励信号被裁判模型的长度偏好污染，容易诱导模型习得"啰嗦但空洞"的应付式回复风格，这一现象在强化学习文献中常被称为"长度攻击"或"啰嗦奖励攻击/Verbosity Reward Hacking"），需要结合客观评测指标（如第 19.3 节的知识/推理类客观题）与人工评估交叉验证，避免把"更长"错误地优化为"更好"。
+
 综上，数据工程是 SFT 全流程中投入产出比最高、也最考验团队工程与业务理解能力的环节，其重要性通常超过对训练算法本身的微调，这也是本报告将其置于框架源码解析之前专门成章讨论的原因。
 
 ---
@@ -228,7 +250,7 @@ ms-swift 提供了丰富的 `loss_scale` 策略（在其 `swift/plugin/loss_scal
 
 ### 4.2 ms-swift 的 Template 抽象设计
 
-ms-swift 将"模板"设计为一个独立的可插拔组件（`swift/llm/template` 目录），核心是一个 `Template` 基类及针对具体模型家族的子类实现（如 `QwenTemplate`、`Llama3Template`、`ChatglmTemplate` 等），并通过模型元信息（`ModelMeta`/`TemplateMeta`）将"某个模型 ID"与"应使用的模板类型"自动关联，用户在命令行中通过 `--model` 指定模型后，框架会自动匹配正确的模板（也可以用 `--template` 显式覆盖）。这种"模型-模板自动绑定 + 允许手动覆盖"的设计，是 ms-swift 能够做到"开箱即用支持数百个模型"而不需要用户逐一了解每个模型模板细节的关键。
+ms-swift 将"模板"设计为一个独立的可插拔组件。需要特别说明版本演进：在 v2.x/v3.x 时期，模板相关代码位于 `swift/llm/template` 子目录下（隶属于当时体量庞大的 `swift.llm` 单体模块）；**v4.0 版本对目录结构做了重大重构（详见官方 Issue #7250），将原 `swift.llm` 拆分为 `swift.template`、`swift.dataset`、`swift.model`、`swift.pipelines` 四个平级子模块**，模板体系随之独立为顶层的 `swift/template` 目录。无论哪个版本，其核心设计都是一个 `Template` 基类及针对具体模型家族的子类实现（如 `QwenTemplate`、`Llama3Template`、`ChatglmTemplate` 等），并通过模型元信息（`ModelMeta`/`TemplateMeta`）将"某个模型 ID"与"应使用的模板类型"自动关联，用户在命令行中通过 `--model` 指定模型后，框架会自动匹配正确的模板（也可以用 `--template` 显式覆盖）。这种"模型-模板自动绑定 + 允许手动覆盖"的设计，是 ms-swift 能够做到"开箱即用支持数百个模型"而不需要用户逐一了解每个模型模板细节的关键。
 
 Template 类的核心方法通常包括：
 
@@ -293,7 +315,7 @@ PEFT 的核心思想是：**冻结预训练模型的绝大部分参数，只引�
 | 效果上限 | 理论最优 | 数据/任务简单时可持平 Full FT，任务复杂或数据规模巨大时可能存在差距 |
 | 典型适用场景 | 大规模高质量数据、追求极致效果、有充裕算力预算 | 中小规模数据、多任务/多租户场景、资源受限环境、快速实验迭代 |
 
-需要指出的是，"LoRA 效果不如 Full FT"并非绝对结论——大量工程实践与研究（包括 LoRA 原论文的实验）表明，在合理设置秩（rank）、学习率、目标模块（target_modules）的前提下，LoRA 在很多任务上可以取得与 Full FT 相当甚至更优的效果（部分归功于其隐式的正则化效应减少了过拟合）；但在需要大幅改变模型行为分布的场景（如大规模持续预训练式的知识注入、复杂推理能力的大幅提升）中，全参数微调或更大秩的 LoRA/更多目标模块通常仍具备优势。ms-swift 通过统一的 `--train_type full/lora/...` 参数将两条路线纳入同一套训练管线，使工程师可以用几乎相同的命令行、仅切换一个参数即可对比两条路线的效果与成本，这也是该类框架的核心工程价值之一。
+需要指出的是，"LoRA 效果不如 Full FT"并非绝对结论——大量工程实践与研究（包括 LoRA 原论文的实验）表明，在合理设置秩（rank）、学习率、目标模块（target_modules）的前提下，LoRA 在很多任务上可以取得与 Full FT 相当甚至更优的效果（部分归功于其隐式的正则化效应减少了过拟合）；但在需要大幅改变模型行为分布的场景（如大规模持续预训练式的知识注入、复杂推理能力的大幅提升）中，全参数微调或更大秩的 LoRA/更多目标模块通常仍具备优势。ms-swift 通过统一的 `--tuner_type full/lora/...` 参数将两条路线纳入同一套训练管线，使工程师可以用几乎相同的命令行、仅切换一个参数即可对比两条路线的效果与成本，这也是该类框架的核心工程价值之一。
 
 ### 5.4 折中路线：部分参数微调与混合策略
 
@@ -374,7 +396,7 @@ QLoRA（Dettmers et al., 2023）解决的核心问题是"如何在极低显存�
 3. **分页优化器（Paged Optimizers）**：借助 NVIDIA 统一内存（Unified Memory）机制，在显存出现瞬时峰值（如梯度检查点重计算时）时自动将优化器状态换出到 CPU 内存，避免 OOM。
 4. **在冻结的量化基座之上叠加标准 LoRA**：前向计算时将 4-bit 权重实时反量化为 bf16/fp16 参与矩阵乘法，反向传播的梯度只流向 LoRA 分支，基座权重全程保持量化状态、不参与梯度更新。
 
-QLoRA 的意义在于证明了"量化基座 + 全精度 LoRA 微调"这一组合可以在几乎不损失效果（论文中报告的下游任务效果与 16-bit 全精度 LoRA 微调基本持平）的前提下，将微调一个 65B 模型所需显存从数百 GB 压缩到一张 48GB 显卡即可完成，是 PEFT 技术能够走向"消费级硬件微调超大模型"的关键里程碑。ms-swift 中通过 `--quant_method bnb --quant_bits 4`（或指定其他量化后端）并同时设置 `--train_type lora` 即可复现 QLoRA 式的训练配置，具体实现细节将在第十六章展开。
+QLoRA 的意义在于证明了"量化基座 + 全精度 LoRA 微调"这一组合可以在几乎不损失效果（论文中报告的下游任务效果与 16-bit 全精度 LoRA 微调基本持平）的前提下，将微调一个 65B 模型所需显存从数百 GB 压缩到一张 48GB 显卡即可完成，是 PEFT 技术能够走向"消费级硬件微调超大模型"的关键里程碑。ms-swift 中通过 `--quant_method bnb --quant_bits 4`（或指定其他量化后端）并同时设置 `--tuner_type lora` 即可复现 QLoRA 式的训练配置，具体实现细节将在第十六章展开。
 
 ### 7.2 AdaLoRA：自适应秩分配
 
@@ -382,7 +404,7 @@ QLoRA 的意义在于证明了"量化基座 + 全精度 LoRA 微调"这一组合
 
 $$\Delta W = P \Lambda Q$$
 
-其中 $P$、$Q$ 近似正交，$\Lambda$ 是对角奇异值矩阵。训练过程中，AdaLoRA 会根据每个奇异值对应"重要性得分"（基于梯度敏感度的重要性度量）动态地对不重要的奇异值（及其对应的秩方向）进行剪枝，将有限的"秩预算"重新分配给更重要的模块/层，从而在总参数量预算不变的前提下提升整体拟合效果。ms-swift 支持 `--train_type adalora`，并暴露 `adalora_target_r`（剪枝后的平均目标秩）、`adalora_init_r`（初始秩，通常大于目标秩，为剪枝留出冗余）、`adalora_tinit`（初始的不剪枝预热步数）等超参数。AdaLoRA 相比标准 LoRA 的额外开销在于需要维护和更新重要性得分，训练速度略慢，但在秩预算紧张的场景下往往能取得更优的参数效率。
+其中 $P$、$Q$ 近似正交，$\Lambda$ 是对角奇异值矩阵。训练过程中，AdaLoRA 会根据每个奇异值对应"重要性得分"（基于梯度敏感度的重要性度量）动态地对不重要的奇异值（及其对应的秩方向）进行剪枝，将有限的"秩预算"重新分配给更重要的模块/层，从而在总参数量预算不变的前提下提升整体拟合效果。ms-swift 支持 `--tuner_type adalora`，并暴露 `adalora_target_r`（剪枝后的平均目标秩）、`adalora_init_r`（初始秩，通常大于目标秩，为剪枝留出冗余）、`adalora_tinit`（初始的不剪枝预热步数）等超参数。AdaLoRA 相比标准 LoRA 的额外开销在于需要维护和更新重要性得分，训练速度略慢，但在秩预算紧张的场景下往往能取得更优的参数效率。
 
 ### 7.3 DoRA：权重分解低秩适配
 
@@ -420,13 +442,29 @@ GaLore（Gradient Low-Rank Projection，Zhao et al., 2024）与前述方法有�
 
 *图 7-1：LoRA 技术家族沿"显存压缩""表达能力提升""秩预算分配""初始化/缩放策略优化"四个方向演进，GaLore 则代表了以低秩技术压缩全参数训练显存的平行路线。*
 
-### 7.9 家族方法对比小结
+### 7.9 学术界最新综述与前沿变体速览（本次修订新增）
+
+为核实第七章内容的准确性与完整性，本次修订专门检索了近两年围绕 PEFT/LoRA 的专业综述论文，主要包括：Han 等人的《Parameter-Efficient Fine-Tuning for Large Models: A Comprehensive Survey》（arXiv:2403.14608，2024）、Wang 等人的《Parameter-Efficient Fine-Tuning in Large Models: A Survey of Methodologies》（arXiv:2410.19878，后发表于 *Artificial Intelligence Review* 期刊）、Mao 等人的《A Survey on LoRA of Large Language Models》（发表于 *Frontiers of Computer Science* 2025 年第 19 卷第 7 期，预印本 arXiv:2407.11046）、Yang 等人的《Low-Rank Adaptation for Foundation Models: A Comprehensive Review》（arXiv:2501.00365，2024）等。这些综述普遍采用与本报告第五章一致的四分类框架（重参数化 Reparameterization / 附加模块 Additive / 选择性 Selective / 混合 Hybrid），验证了本报告分类方法的合理性。
+
+综述文献同时梳理了一批本报告初稿未曾覆盖、但具有代表性的 LoRA 变体，此处做简要补充，供读者按需深入：
+
+- **LoftQ（LoRA-Fine-Tuning-aware Quantization，Li et al., 2023）**：针对 QLoRA 的一个观察——直接对基座权重做量化会引入量化误差，而 LoRA 的零初始化并不能补偿这一误差，导致量化+LoRA 的联合初始点相比原始高精度模型有偏移。LoftQ 提出在量化的同时，联合求解一个初始化的 LoRA 低秩分支，使得"量化权重 + LoRA 分支"在数学上更好地逼近原始高精度权重，从而改善量化场景下的初始化质量，缓解 QLoRA 相比标准 LoRA 的精度损失。
+- **MoRA（High-Rank Updating for Parameter-Efficient Fine-Tuning，Jiang et al., 2024）**：指出 LoRA 的低秩结构本身对"需要大幅改变模型知识/记忆能力"的任务（如持续预训练式的知识注入）存在表达能力上限，提出用方阵配合非线性压缩/解压缩算子实现"参数量与 LoRA 相当，但等效更新矩阵秩更高"的方案，在记忆密集型任务上相比标准 LoRA 有更好表现。
+- **HydraLoRA（Tian et al., 2024）**：观察到不同下游任务/领域对 LoRA 的低秩子空间需求存在共性与差异性并存的现象，提出"共享的降维矩阵 A + 多个任务专属的升维矩阵 B，并配合路由（Routing）机制选择/组合不同 B 头的贡献"的非对称结构，在多任务混合训练场景下相比标准 LoRA 有更好的参数效率与效果。
+- **VB-LoRA（Li et al., 2024）**：提出用一个共享的"向量库"（Vector Bank）以及轻量级的组合系数来参数化所有层的低秩更新，将可训练参数进一步压缩到极低水平（"extreme parameter efficient"），适合对存储/传输成本极度敏感的多任务部署场景。
+- **SVFT / LoRA-XS（Lingam et al., 2024；Bałazy et al., 2024）**：延续 PiSSA"利用预训练权重 SVD 分解"的思路，但进一步只训练分解出的奇异值对角矩阵（或一个更小的核心矩阵），将 A、B 两个投影矩阵完全固定为 SVD 结果不参与训练，从而把可训练参数压缩到比标准 LoRA 低一到两个数量级。
+- **ReLoRA（Lialin et al., 2023）**：提出在训练过程中"周期性地将当前 LoRA 分支合并进基座权重，然后重新初始化一个新的 LoRA 分支继续训练"，通过多轮"合并-重启"实现等效的高秩累积更新，主要面向"用低秩更新实现类似全参数预训练效果"的场景（而非典型的下游任务微调场景）。
+- **RandLoRA / AutoLoRA（2024）**：分别从"随机基底组合实现全秩更新"（RandLoRA）与"用元学习/搜索方式自动确定每层最优秩配置"（AutoLoRA，可视为 AdaLoRA 秩分配问题的另一种求解思路）两个角度对标准 LoRA 做进一步改进。
+
+需要提醒读者的是：以上变体大多仍处于学术研究阶段，讨论中提及的"效果提升"结论均来自各自论文报告的实验设置，读者若计划在实际业务中采用，应结合自身任务与数据规模做充分验证，而非直接假设论文报告的收益可以无条件迁移。截至本次修订调研，ms-swift 官方文档与示例中原生支持的 LoRA 变体仍以第 7.1~7.7 节介绍的 QLoRA/AdaLoRA/DoRA/rsLoRA/PiSSA 为主，上述更前沿的变体尚未见到框架原生参数支持，如有需要通常需要用户自行基于 PEFT 库或 ms-swift 的自研 Tuner 接口做二次开发。
+
+### 7.10 家族方法对比小结
 
 | 方法 | 核心改动点 | 额外开销 | 是否改变推理结构 | ms-swift 支持方式（示意） |
 | --- | --- | --- | --- | --- |
-| LoRA | 低秩增量分解 | 极低 | 否（可合并） | `--train_type lora` |
-| QLoRA | 基座 4-bit 量化 + LoRA | 量化/反量化计算 | 否 | `--quant_bits 4 --train_type lora` |
-| AdaLoRA | SVD 参数化 + 动态秩剪枝 | 重要性得分计算 | 否 | `--train_type adalora` |
+| LoRA | 低秩增量分解 | 极低 | 否（可合并） | `--tuner_type lora` |
+| QLoRA | 基座 4-bit 量化 + LoRA | 量化/反量化计算 | 否 | `--quant_bits 4 --tuner_type lora` |
+| AdaLoRA | SVD 参数化 + 动态秩剪枝 | 重要性得分计算 | 否 | `--tuner_type adalora` |
 | DoRA | 幅度/方向解耦 | 范数归一化计算 | 否（可合并） | `--use_dora true` |
 | rsLoRA | 缩放因子改为 $\alpha/\sqrt r$ | 几乎无 | 否 | `--use_rslora true` |
 | PiSSA | SVD 主成分初始化 | 初始化时一次性 SVD | 否 | `--init_weights pissa` |
@@ -455,11 +493,11 @@ Prefix-Tuning（Li & Liang, 2021）与 Prompt-Tuning（Lester et al., 2021）不
 
 ### 8.4 BOFT / OFT：正交微调
 
-正交微调（Orthogonal Fine-tuning, OFT）及其块状变体 BOFT（Butterfly Orthogonal Fine-Tuning）从另一个角度约束权重更新：不是加性地叠加 $\Delta W$，而是对原始权重施加一个**正交变换**（$W' = RW_0$，$R$ 为正交矩阵），利用正交变换"保范数、不改变权重矩阵行/列间夹角结构"的性质，从理论上被认为能更好地保留预训练模型的知识结构，缓解灾难性遗忘。BOFT 通过蝶形分解（Butterfly Factorization）高效参数化大型正交矩阵，在参数量和计算效率上做了针对性优化，使其可以在大模型上落地。ms-swift 将其作为 `--train_type boft` 提供支持，是相对小众但在部分对"知识保持"要求较高的场景（如持续学习、多轮增量微调）中具有独特价值的技术路线。
+正交微调（Orthogonal Fine-tuning, OFT）及其块状变体 BOFT（Butterfly Orthogonal Fine-Tuning）从另一个角度约束权重更新：不是加性地叠加 $\Delta W$，而是对原始权重施加一个**正交变换**（$W' = RW_0$，$R$ 为正交矩阵），利用正交变换"保范数、不改变权重矩阵行/列间夹角结构"的性质，从理论上被认为能更好地保留预训练模型的知识结构，缓解灾难性遗忘。BOFT 通过蝶形分解（Butterfly Factorization）高效参数化大型正交矩阵，在参数量和计算效率上做了针对性优化，使其可以在大模型上落地。ms-swift 将其作为 `--tuner_type boft` 提供支持，是相对小众但在部分对"知识保持"要求较高的场景（如持续学习、多轮增量微调）中具有独特价值的技术路线。
 
 ### 8.5 FourierFT：傅里叶域参数化
 
-FourierFT（Gao et al., 2024）提出在傅里叶频域而非空间域参数化权重更新量：先在频域随机选定一组稀疏的频率分量作为可训练参数，训练完成后通过逆离散傅里叶变换（IDFT）将其变换回空间域的稠密权重更新矩阵。得益于傅里叶变换的能量集中特性，仅需极少数频率分量即可重构出具有全局结构的稠密更新矩阵，从而以比 LoRA 更少的可训练参数达到相近的效果，是"以变换域稀疏表示换取参数效率"这一思路的代表性方法。ms-swift 提供 `--train_type fourierft` 支持。
+FourierFT（Gao et al., 2024）提出在傅里叶频域而非空间域参数化权重更新量：先在频域随机选定一组稀疏的频率分量作为可训练参数，训练完成后通过逆离散傅里叶变换（IDFT）将其变换回空间域的稠密权重更新矩阵。得益于傅里叶变换的能量集中特性，仅需极少数频率分量即可重构出具有全局结构的稠密更新矩阵，从而以比 LoRA 更少的可训练参数达到相近的效果，是"以变换域稀疏表示换取参数效率"这一思路的代表性方法。ms-swift 提供 `--tuner_type fourierft` 支持。
 
 ### 8.6 ReFT：表征微调
 
@@ -467,15 +505,15 @@ FourierFT（Gao et al., 2024）提出在傅里叶频域而非空间域参数化�
 
 ### 8.7 LLaMA-Pro：块扩展
 
-LLaMA-Pro（Wu et al., 2024）提出一种"结构扩展式"的高效微调思路：在原始 Transformer 的层与层之间插入若干新的、初始化为"恒等映射"（新增层的输出增量初始为零）的 Transformer 块，微调时**冻结所有原始层，只训练新插入的块**。由于原始层完全冻结，模型的通用能力得以完整保留，新增的领域适配能力则完全由新插入块承载，兼具"知识保留"与"能力扩展"两方面优势，代价是模型总层数（推理成本）会有所增加。ms-swift 通过 `--train_type llamapro`，配合 `--llamapro_num_new_blocks`（新增层总数）、`--llamapro_num_groups`（新增层的插入分组方式）参数支持该方法。
+LLaMA-Pro（Wu et al., 2024）提出一种"结构扩展式"的高效微调思路：在原始 Transformer 的层与层之间插入若干新的、初始化为"恒等映射"（新增层的输出增量初始为零）的 Transformer 块，微调时**冻结所有原始层，只训练新插入的块**。由于原始层完全冻结，模型的通用能力得以完整保留，新增的领域适配能力则完全由新插入块承载，兼具"知识保留"与"能力扩展"两方面优势，代价是模型总层数（推理成本）会有所增加。ms-swift 通过 `--tuner_type llamapro`，配合 `--llamapro_num_new_blocks`（新增层总数）、`--llamapro_num_groups`（新增层的插入分组方式）参数支持该方法。
 
 ### 8.8 LongLoRA：面向长上下文扩展的高效微调
 
-LongLoRA（Chen et al., 2023）并非通用 PEFT 方法，而是专门针对"如何低成本地将模型的上下文窗口从较短长度（如 4K）扩展到更长（如 32K/100K）"这一场景设计。其核心技术组合包括：**转移短注意力（Shifted Sparse Attention, S²-Attn）**——训练阶段用分组局部注意力（配合分组偏移，近似长程依赖）替代标准全量注意力以降低长序列训练的显存/计算开销（推理时仍可使用标准全量注意力，不影响效果一致性）；以及**可训练的 Embedding 与 Normalization 层 + LoRA**——在标准 LoRA 基础上额外解冻 Embedding 层与 LayerNorm/RMSNorm 层参与训练（这两类参数量很小但对长上下文的位置编码适配、数值稳定性影响较大）。ms-swift 支持 `--train_type longlora` 及配套的长度扩展相关参数，是训练长文档处理、长代码库理解等长上下文能力模型的重要工具。
+LongLoRA（Chen et al., 2023）并非通用 PEFT 方法，而是专门针对"如何低成本地将模型的上下文窗口从较短长度（如 4K）扩展到更长（如 32K/100K）"这一场景设计。其核心技术组合包括：**转移短注意力（Shifted Sparse Attention, S²-Attn）**——训练阶段用分组局部注意力（配合分组偏移，近似长程依赖）替代标准全量注意力以降低长序列训练的显存/计算开销（推理时仍可使用标准全量注意力，不影响效果一致性）；以及**可训练的 Embedding 与 Normalization 层 + LoRA**——在标准 LoRA 基础上额外解冻 Embedding 层与 LayerNorm/RMSNorm 层参与训练（这两类参数量很小但对长上下文的位置编码适配、数值稳定性影响较大）。ms-swift 支持 `--tuner_type longlora` 及配套的长度扩展相关参数，是训练长文档处理、长代码库理解等长上下文能力模型的重要工具。
 
 ### 8.9 LISA：层级重要性采样的全参数训练
 
-LISA（Layerwise Importance Sampled AdamW，Pan et al., 2024）针对的问题是：全参数训练显存开销大，而 LoRA 表达能力有限，能否找到"接近全参数训练效果、又不需要全参数训练显存"的折中方案？LISA 的做法是：训练过程中动态、随机地只解冻一小部分层（如 2 或 8 层）参与本轮迭代的全参数更新，其余层临时冻结，每隔若干步重新采样一批新的层参与训练，如此循环。由于任意时刻只有少数层的参数、梯度、优化器状态需要驻留显存，LISA 可以用远低于全参数训练的显存开销，在多项基准上取得优于标准 LoRA、接近全参数训练的效果，是"选择性微调"路线中较具代表性的高性价比方案。需要注意 LISA 本质上仍是全参数训练的一种（只是分批次、采样式地训练），因此仅支持 `--train_type full` 场景下叠加（早期 ms-swift 文档中明确标注"LISA only supports full training"）。
+LISA（Layerwise Importance Sampled AdamW，Pan et al., 2024）针对的问题是：全参数训练显存开销大，而 LoRA 表达能力有限，能否找到"接近全参数训练效果、又不需要全参数训练显存"的折中方案？LISA 的做法是：训练过程中动态、随机地只解冻一小部分层（如 2 或 8 层）参与本轮迭代的全参数更新，其余层临时冻结，每隔若干步重新采样一批新的层参与训练，如此循环。由于任意时刻只有少数层的参数、梯度、优化器状态需要驻留显存，LISA 可以用远低于全参数训练的显存开销，在多项基准上取得优于标准 LoRA、接近全参数训练的效果，是"选择性微调"路线中较具代表性的高性价比方案。需要注意 LISA 本质上仍是全参数训练的一种（只是分批次、采样式地训练），因此仅支持 `--tuner_type full` 场景下叠加（早期 ms-swift 文档中明确标注"LISA only supports full training"）。
 
 ### 8.10 方法选型的工程决策树
 
@@ -597,48 +635,55 @@ ms-swift（Scalable lightWeight Infrastructure for Fine-Tuning）是阿里巴巴
 
 ### 11.2 顶层代码地图
 
-结合 ms-swift 公开的仓库目录结构、DeepWiki 技术文档梳理以及社区源码分析文章的交叉印证，其核心代码组织大致如下（目录/模块名以调研时可获得的信息为准，具体文件可能随版本演进有所调整）：
+结合 ms-swift 公开的仓库目录结构、官方 Issue #7250（"Welcome ms-swift v4"重构说明）、DeepWiki 技术文档梳理以及社区源码分析文章的交叉印证，其核心代码组织存在一次关键的版本分水岭：
+
+> **v2.x / v3.x 时期**：几乎所有 LLM 相关能力（模板、数据集、模型、训练入口、参数体系）都集中在一个体量庞大的单体模块 `swift/llm/` 下，内部再按 `train/`、`template/`、`dataset/`、`model/`、`argument/`、`infer/` 等子目录组织。
+>
+> **v4.0 起（当前 main 分支）**：官方对该单体模块做了拆分重构，`swift.llm` 被拆分为 `swift.template`、`swift.dataset`、`swift.model`、`swift.pipelines` 四个平级的顶层子模块，目的是降低模块间的隐式依赖、让职责边界更清晰。
+
+调研时可获得信息下、v4.x 分支的核心代码组织大致如下（具体文件仍可能随版本演进有所调整，建议以 `pip show ms-swift` 或本地安装包路径实际浏览为准）：
 
 ```
 ms-swift/
 ├── swift/
-│   ├── cli/                  # 命令行入口层：sft.py / infer.py / rlhf.py / export.py / deploy.py / eval.py / app.py 等
-│   │                          # 每个文件仅做参数解析转发，真正的业务逻辑在 swift/llm 与 swift/megatron 下
-│   ├── llm/
-│   │   ├── train/            # 训练主流程：sft.py（SwiftSft 类）、rlhf.py、pt.py 等，串联 数据+模板+Tuner+Trainer
-│   │   ├── template/         # 对话模板体系：Template 基类与各模型家族的模板注册（见第四章）
-│   │   ├── dataset/          # 数据集加载、预处理、注册机制（register_dataset / DatasetMeta）
-│   │   ├── model/            # 模型加载、ModelMeta 注册、模型与模板/量化方式的自动绑定关系
-│   │   ├── argument/         # 参数体系：TrainArguments / SftArguments / RLHFArguments 等 dataclass 定义
-│   │   ├── infer/             # 推理相关：transformers/vLLM/SGLang/LMDeploy 等后端适配
-│   │   └── utils/             # 通用工具
-│   ├── trainers/              # 对 HuggingFace Transformers Trainer / TRL Trainer 的封装与混入（Mixin）
-│   │   ├── mixin.py            # TrainerMixin：注入 swift 特有的日志、保存、loss 计算等行为
-│   │   ├── trainers.py         # 具体 Trainer 子类（Seq2SeqTrainer 封装等）
-│   │   └── rlhf_trainer/       # DPO/KTO/PPO/GRPO 等 RLHF Trainer（部分对接/魔改自 TRL 库）
-│   ├── tuners/                 # Tuner 体系：对 PEFT 库的封装 + ms-swift 自研 Tuner（LLaMA-Pro/LongLoRA 等）
+│   ├── cli/                   # 命令行入口层：main.py（console_scripts 唯一入口 swift.cli.main:cli_main）
+│   │                           # 及 sft.py / infer.py / rlhf.py / export.py / deploy.py / eval.py 等子命令模块
+│   │                           # 每个子命令文件仅做参数解析转发，真正业务逻辑在 pipelines/template/dataset/model 下
+│   ├── template/               # 【v4新增顶层模块，原 swift/llm/template】对话模板体系（见第四章）
+│   ├── dataset/                # 【v4新增顶层模块，原 swift/llm/dataset】数据集加载、预处理、注册机制
+│   ├── model/                  # 【v4新增顶层模块，原 swift/llm/model】模型加载、ModelMeta 注册
+│   ├── pipelines/              # 【v4新增顶层模块】训练/推理等流程编排（SftArguments 等参数类、
+│   │                           #   xxx_main() 入口函数、SwiftPipeline 生命周期基类等原 swift/llm/train 职责）
+│   ├── trainers/               # 对 HuggingFace Transformers Trainer / TRL Trainer 的封装与混入（Mixin）
+│   │   ├── mixin.py             # TrainerMixin：注入 swift 特有的日志、保存、loss 计算等行为
+│   │   ├── trainers.py          # 具体 Trainer 子类（Seq2SeqTrainer 封装等）
+│   │   └── rlhf_trainer/        # DPO/KTO/PPO/GRPO 等 RLHF Trainer（部分对接/魔改自 TRL 库）
+│   ├── tuners/                  # Tuner 体系：对 PEFT 库的封装 + ms-swift 自研 Tuner（LLaMA-Pro/LongLoRA 等）
 │   │   └── Swift.prepare_model() 是核心入口，负责将 Tuner Config 注入基座模型，返回 SwiftModel 包装对象
 │   ├── plugin/                  # 插件体系：loss_scale（第二章提及）、metric、callback、optimizer 等可插拔组件
-│   ├── megatron/                # Megatron-SWIFT：对接 Megatron-Core 的训练器（trainers/base.py 等）
+│   ├── megatron/                # Megatron-SWIFT：v4 起改为对接 megatron-core（丢弃 megatron-lm 依赖），
+│   │                           #   训练循环已重写；console_scripts 独立入口 megatron=swift.cli._megatron.main:cli_main
 │   └── ui/                      # Web-UI（Gradio）
 ├── examples/                    # 海量开箱即用的训练脚本示例，按模型/任务/技术点分类组织
 │   ├── models/                  # 按具体模型（Qwen3、GLM、Gemma4...）组织的最佳实践脚本
 │   ├── megatron/                # Megatron-SWIFT 专项示例（含 FP8+LoRA 组合等）
-│   └── train/                   # 通用训练技巧示例（packing、multi-node、lora 变体等）
+│   └── train/                   # 通用训练技巧示例（packing、cached_dataset、multi-node、lora 变体等）
 └── docs/
     ├── source/                  # 中文文档
     └── source_en/                # 英文文档
 ```
 
+需要提醒读者：本报告初稿曾沿用 v2.x/v3.x 时期的 `swift/llm/template` 等旧路径描述（这是本报告收到的一处具体读者纠错），现已按上述 v4.x 实际结构订正；但由于该项目仍处于活跃重构期（v4 系列本身也在 4.0 → 4.5.0.dev0 持续演进），具体的子模块划分未来仍可能进一步调整，工程实践中应始终以自己实际安装版本为准。
+
 ### 11.3 分层设计哲学
 
 从上述代码地图可以归纳出 ms-swift 的几条核心设计原则：
 
-1. **CLI 层与业务逻辑层严格分离**：`swift/cli/*.py` 极薄，仅负责参数解析与转发到 `swift/llm/train/*.py` 中的 `xxx_main()` 函数，这种设计使得同样的训练能力既可以通过命令行调用，也可以通过 Python API（`from swift.llm import sft_main, TrainArguments`）以编程方式调用，便于集成进更大的 MLOps 流水线或 Notebook 交互式实验。
-2. **参数体系以 dataclass 为核心、分层继承**：不同训练范式（SFT/RLHF/PT）的参数类通过继承复用公共基类（如通用的模型加载参数、数据集参数、Transformers `Seq2SeqTrainingArguments` 透传参数），特定范式再扩展自己独有的参数（如 RLHF 特有的 `beta`、`ref_model`），这种"基类共享 + 子类扩展"的组织方式既避免了重复定义，又保证了同一套数据/模型/模板基础设施可以被所有训练范式复用。
-3. **Template、Tuner、Trainer 三大核心组件均支持插件式扩展**：新增一个模型的对话模板、新增一种 PEFT 方法、新增一种训练算法的 Trainer，理论上都可以通过"注册（register）"机制以插件形式接入，而不需要改动框架核心代码，这是该类框架能够快速跟进社区新模型、新算法（如新发布的 Qwen3.x、GLM-5.x 系列几乎第一时间被纳入支持列表）的架构基础。
-4. **训练与推理复用同一套 Template/量化基础设施**：这是保证"训练时的数据拼接方式"与"推理时的数据拼接方式"严格一致（呼应第四章提到的 Train-Inference Template Mismatch 问题）的关键架构选择——`swift infer` 命令与 `swift sft` 命令共享同一个 `Template` 类实现，从根本上杜绝了"两套独立维护的模板代码逐渐漂移不一致"的风险。
-5. **Megatron-SWIFT 作为独立但接口对齐的子系统**：面向超大规模训练的 Megatron-SWIFT 并非简单复用标准 Trainer，而是维护了一套独立的 `swift/megatron/trainers` 体系（如 `BaseMegatronTrainer` 抽象基类），但在命令行层面通过 `megatron sft`（而非 `swift sft`）暴露给用户，并尽量保持与标准 `swift sft` 相似的参数命名与使用习惯（如同样支持 `--tuner_type lora`），降低用户在"常规规模训练"与"超大规模训练"两种模式之间切换的学习成本。
+1. **CLI 层与业务逻辑层严格分离**：`swift` 命令的 console_scripts 入口统一指向 `swift.cli.main:cli_main`（`setup.py` 中确认的注册方式），该入口解析子命令（sft/infer/rlhf/export/eval/deploy 等）后转发到 `swift/cli/` 下对应的子命令模块，再进一步调用 `swift.pipelines` 中的 `xxx_main()` 函数完成实际业务逻辑。这种设计使得同样的训练能力既可以通过命令行调用，也可以通过 Python API 以编程方式调用（官方给出的编程式用法示例为 `from swift import get_model_processor, get_template, load_dataset, EncodePreprocessor` 搭配 `from swift.trainers import Seq2SeqTrainer, Seq2SeqTrainingArguments`，必要时结合标准 `peft` 库的 `LoraConfig`/`get_peft_model` 或 ms-swift 自身的 `Swift.prepare_model()`），便于集成进更大的 MLOps 流水线或 Notebook 交互式实验。
+2. **参数体系以 dataclass 为核心、分层继承**：不同训练范式（SFT/RLHF/PT/Megatron）的参数类（`SftArguments`、`RLHFArguments`、`MegatronArguments` 等）通过继承复用公共基类（如通用的模型加载参数、数据集参数、Transformers `Seq2SeqTrainingArguments` 透传参数），特定范式再扩展自己独有的参数（如 RLHF 特有的 `beta`、`ref_model`），这种"基类共享 + 子类扩展"的组织方式既避免了重复定义，又保证了同一套数据/模型/模板基础设施可以被所有训练范式复用。
+3. **Template、Tuner、Trainer 三大核心组件均支持插件式扩展**：新增一个模型的对话模板、新增一种 PEFT 方法、新增一种训练算法的 Trainer，理论上都可以通过"注册（register）"机制以插件形式接入，而不需要改动框架核心代码，这是该类框架能够快速跟进社区新模型、新算法（如新发布的 Qwen3.x、GLM-5.x 系列几乎第一时间被纳入支持列表，据社区反馈 DeepSeek-V3.2/GLM-5.0 等模型的适配工作在其发布后很短时间内即启动）的架构基础。
+4. **训练与推理复用同一套 Template/量化基础设施**：这是保证"训练时的数据拼接方式"与"推理时的数据拼接方式"严格一致（呼应第四章提到的 Train-Inference Template Mismatch 问题）的关键架构选择——`swift infer` 命令与 `swift sft` 命令共享同一个 `Template` 类实现（`get_template()` 函数），从根本上杜绝了"两套独立维护的模板代码逐渐漂移不一致"的风险。
+5. **Megatron-SWIFT 作为独立但接口对齐的子系统**：面向超大规模训练的 Megatron-SWIFT 并非简单复用标准 Trainer，而是维护了一套独立的 `swift/megatron/trainers` 体系（如 `BaseMegatronTrainer` 抽象基类），拥有自己独立的 console_scripts 入口（`megatron` 命令，对应 `swift.cli._megatron.main:cli_main`），但在参数命名与使用习惯上尽量与标准 `swift sft` 保持一致（如同样支持 `--tuner_type lora`），降低用户在"常规规模训练"与"超大规模训练"两种模式之间切换的学习成本；v4 版本进一步将 Megatron 训练循环重写并改为依赖 `megatron-core`（不再依赖完整的 `megatron-lm` 仓库）。
 
 ### 11.4 与上游生态的关系
 
@@ -657,7 +702,8 @@ ms-swift/
 
 ms-swift 的命令行参数在项目演进过程中经历过若干次重要的命名调整，理解这些调整有助于读者在阅读不同时期的文档/博客/脚本时不产生混淆：
 
-- **微调类型参数**：早期版本（2.x 及更早）使用 `--sft_type`（可选 `lora`/`full`/`longlora`/`adalora`/`ia3`/`llamapro`/`adapter`/`vera`/`boft`/`fourierft`/`reft` 等），3.x 版本起统一更名为 `--train_type`，语义不变；而在更新的接口/文档片段中，也观察到以 `--tuner_type` 命名出现（与 `--train_type` 并存或替代关系），提示读者应以自己实际安装版本的帮助信息为准。
+- **微调类型参数**：早期版本（2.x 及更早）使用 `--sft_type`（可选 `lora`/`full`/`longlora`/`adalora`/`ia3`/`llamapro`/`adapter`/`vera`/`boft`/`fourierft`/`reft` 等），3.x 版本一度更名为 `--train_type`；**截至本报告调研时，官方 README 与 `examples/` 目录下的全部脚本示例已统一使用 `--tuner_type`**（例如 `swift sft --tuner_type lora`、`swift rlhf --rlhf_type dpo --tuner_type lora`、`megatron sft --tuner_type lora`），可以确认 `--tuner_type` 是当前版本的标准命名，`--sft_type`/`--train_type` 应视为历史遗留命名。本报告正文中出现的 `--train_type` 表述已统一订正为 `--tuner_type`。
+- **Tuner 后端选择**：当前版本新增 `--tuner_backend` 参数，可选 `peft`（默认）或 `unsloth`，用于选择底层 Tuner 实现依赖的加速库后端，这是 v3.x 时期文档中未曾出现、本次修订新确认到的参数。
 - **LoRA 目标模块参数**：早期为 `--lora_target_modules`，后统一简化为通用的 `--target_modules`（不再局限于 LoRA，其余 Tuner 同样复用该参数名），默认值在多模态场景与纯文本场景下有不同的智能推断逻辑（`all-linear` 快捷值的具体展开范围会区分是否包含视觉/对齐模块）。
 - **量化位宽参数**：从早期的 `--quantization_bit` 演进为更明确的 `--quant_bits` / `--quant_method`（区分量化位宽与量化算法后端，如 bnb/awq/gptq/hqq）。
 - **数据集采样后缀语法**：`--dataset` 支持形如 `AI-ModelScope/alpaca-gpt4-data-zh#500` 的写法，`#500` 表示从该数据集中采样 500 条，这种"数据集路径+采样数量"内联语法贯穿了 ms-swift 各版本，是其数据集参数设计中较为稳定、也颇具辨识度的一个特性，便于用户在命令行一行内完成"多数据源、按比例混合采样"的配置，无需额外编写数据混合脚本。
@@ -683,7 +729,7 @@ ms-swift 的命令行参数在项目演进过程中经历过若干次重要的�
 - `--dataloader_num_workers`：数据加载并行进程数。
 
 **（3）微调方式类**
-- `--train_type`（或 `--tuner_type`）：`full` / `lora` / `longlora` / `adalora` / `llamapro` / `adapter` / `vera` / `boft` / `fourierft` / `reft` 等。
+- `--tuner_type`：`full` / `lora` / `longlora` / `adalora` / `llamapro` / `adapter` / `vera` / `boft` / `fourierft` / `reft` 等（`--sft_type`/`--train_type` 为历史遗留命名，见 12.1 节）。
 - `--target_modules`：LoRA 等 Tuner 的作用模块，`all-linear` 为快捷全覆盖选项。
 - `--lora_rank` / `--lora_alpha` / `--lora_dropout`：标准 LoRA 三大超参。
 - `--use_dora` / `--use_rslora`：DoRA / rsLoRA 开关。
@@ -740,15 +786,18 @@ ms-swift 的命令行参数在项目演进过程中经历过若干次重要的�
 
 ### 13.1 完整调用链概览
 
-```
-用户执行:  swift sft --model Qwen/Qwen3-8B --train_type lora --dataset ... --output_dir output
+> 版本说明：以下调用链路已按 v4.x 分支的确认信息订正——`setup.py` 中 `console_scripts` 确认 `swift` 命令唯一映射到 `swift.cli.main:cli_main`（而非过去误传的"每个子命令各自独立注册一个可执行入口"），子命令的具体训练编排逻辑（原 v3.x 时期的 `swift/llm/train/sft.py`）在 v4.x 中已归属新拆分出的 `swift.pipelines` 子模块；同时官方 DeepWiki 技术文档显示训练参数类命名为 `SftArguments`（与 `RLHFArguments`、`MegatronArguments` 并列），本报告此前"TrainArguments"的表述已一并订正。
 
-  ① swift（console-script 可执行入口，由 setup.py 中的 entry_points 注册）
+```
+用户执行:  swift sft --model Qwen/Qwen3-8B --tuner_type lora --dataset ... --output_dir output
+
+  ① swift（console-script 可执行入口，setup.py 中确认注册为 swift.cli.main:cli_main）
         │
-  ② swift/cli/sft.py            —— CLI 子命令入口：解析 sys.argv，调用 sft_main()
+  ② swift.cli.main:cli_main         —— 解析子命令名（sft/infer/rlhf/export/eval/deploy...），
+        │                              分发到 swift/cli/ 下对应子命令模块，进而调用 sft_main()
         │
-  ③ sft_main()  (swift/llm/train/sft.py)
-        │        —— 顶层函数：接收 / 解析为 TrainArguments（或 SftArguments）dataclass 实例
+  ③ sft_main()  (swift.pipelines 子模块下的训练编排入口)
+        │        —— 顶层函数：接收 / 解析为 SftArguments dataclass 实例
         │        —— 内部 return SwiftSft(args).main()
         │
   ④ class SwiftSft(SwiftPipeline, TunerMixin):
@@ -756,21 +805,24 @@ ms-swift 的命令行参数在项目演进过程中经历过若干次重要的�
         │        —— TunerMixin：混入 Tuner 相关能力（准备/加载/保存 PEFT 权重等）
         │
         ├── self.main()
-        │       ├── 加载 tokenizer / 模型（依据 --model 与 ModelMeta 自动匹配模型实现与量化方式）
-        │       ├── 依据模型自动匹配 / 用户显式指定的 Template 实例化对话模板
+        │       ├── 加载 tokenizer / 模型：get_model_processor() 依据 --model 解析 MODEL_MAPPING
+        │       │     并自动匹配模型实现与量化方式
+        │       ├── get_template()：依据模型自动匹配 / 用户显式指定的 Template 实例化对话模板
         │       ├── 通过 Swift.prepare_model() 将 Tuner（LoRA/AdaLoRA/...或全参数配置）注入模型，
         │       │     得到 SwiftModel 包装对象（冻结/解冻相应参数，注册可训练模块）
-        │       ├── 加载并预处理数据集（dataset 注册机制 → 标准化为 messages → Template.encode
-        │       │     → 生成 input_ids / labels / attention_mask，可选执行 Packing）
+        │       ├── load_dataset() 加载数据集，AutoPreprocessor 自动探测格式
+        │       │     （messages / alpaca / query-response）→ 标准化为 messages
+        │       │     → EncodePreprocessor 调用 Template.encode 生成 input_ids / labels /
+        │       │       attention_mask（可选执行 Packing）
         │       ├── 构造 DataCollator（负责 batch 内 padding、labels 对齐、多模态张量整理等）
-        │       ├── 构造 Trainer（swift/trainers 下对 HF Seq2SeqTrainer 的封装子类，
+        │       ├── 构造 Trainer（swift.trainers.Seq2SeqTrainer，对 HF Seq2SeqTrainer 的封装子类，
         │       │     通过 TrainerMixin 注入 swift 特有的日志、保存、loss_scale 应用逻辑）
         │       └── self.run() → self.train(trainer)
         │
   ⑤ self.train(trainer)
         │        —— 调用 trainer.train(resume_from_checkpoint=...)
         │
-  ⑥ trainer.train(...)   (来自 swift/trainers/trainers.py 中继承自 transformers.Seq2SeqTrainer 的类，
+  ⑥ trainer.train(...)   (swift.trainers.Seq2SeqTrainer，继承自 transformers.Seq2SeqTrainer，
         │                  经 swift/trainers/mixin.py 中的 Mixin 类混入 swift 定制行为)
         │        —— 实际执行 HuggingFace Transformers 标准训练循环：
         │             for epoch in range(num_train_epochs):
@@ -782,7 +834,7 @@ ms-swift 的命令行参数在项目演进过程中经历过若干次重要的�
         │                 optimizer.step(); scheduler.step()  # 参数更新
         │             —— 周期性触发 evaluate()（若配置了 --eval_steps）与 save_checkpoint()
         │
-  ⑦ 训练结束后，SwiftSft.main() further 调用保存逻辑：
+  ⑦ 训练结束后，SwiftSft.main() 进一步调用保存逻辑（save_pretrained()）：
         │        —— 保存最终 adapter 权重（PEFT 场景，通常仅几十~几百MB）或全量权重（Full 场景）
         │        —— 保存 args.json（记录本次训练的完整参数配置，供后续 `swift infer`/`swift export`
         │             自动读取，无需用户重复指定 --model/--system 等参数）
@@ -796,7 +848,7 @@ ms-swift 的命令行参数在项目演进过程中经历过若干次重要的�
 
 **（1）`SwiftPipeline` 的生命周期抽象**：ms-swift 将"训练""推理""导出""部署"等不同命令行子命令，统一抽象为若干个共享 `main() → run()` 标准生命周期的 Pipeline 子类（如 `SwiftSft`、`SwiftInfer`、`SwiftExport`），每个 Pipeline 只需重写各自差异化的 `run()`/`train()`/`infer()` 等钩子方法，公共的参数解析、模型/模板加载逻辑则在基类中统一实现，避免各子命令各自为政、重复代码。这是一种典型的模板方法模式（Template Method Pattern）在训练框架架构设计中的应用。
 
-**（2）`TunerMixin` 的职责边界**：Tuner 相关能力（如何根据 `--train_type` 构造对应的 PEFT Config、如何调用 `Swift.prepare_model()` 完成注入、训练结束后如何正确保存/合并权重）被抽离为独立的 Mixin 类，通过多重继承（`class SwiftSft(SwiftPipeline, TunerMixin)`）组合进具体 Pipeline，使得"训练流程编排"与"Tuner 具体实现细节"在代码组织上解耦，Tuner 体系的新增/修改不需要触碰 Pipeline 主干逻辑。
+**（2）`TunerMixin` 的职责边界**：Tuner 相关能力（如何根据 `--tuner_type` 构造对应的 PEFT Config、如何调用 `Swift.prepare_model()` 完成注入、训练结束后如何正确保存/合并权重）被抽离为独立的 Mixin 类，通过多重继承（`class SwiftSft(SwiftPipeline, TunerMixin)`）组合进具体 Pipeline，使得"训练流程编排"与"Tuner 具体实现细节"在代码组织上解耦，Tuner 体系的新增/修改不需要触碰 Pipeline 主干逻辑。
 
 **（3）`swift/trainers/mixin.py` 对 HuggingFace Trainer 的"无侵入式增强"**：ms-swift 没有选择完全重写训练循环（这将带来巨大的维护成本、且难以及时跟进 Transformers 库本身的持续优化——如新的分布式后端支持、新的性能优化），而是选择通过 Mixin（混入类）的方式在 HuggingFace `Seq2SeqTrainer` 基础上"打补丁"式地注入 swift 特有的行为，例如：
    - 重写 `compute_loss`，在标准交叉熵基础上应用 `loss_scale` 插件计算出的 token 级权重；
@@ -807,7 +859,108 @@ ms-swift 的命令行参数在项目演进过程中经历过若干次重要的�
 
 **（4）数据到模型输入的转换发生在 Dataset 预处理阶段而非 Collator 阶段**：即 `Template.encode` 在数据加载/预处理阶段就已经把原始的 `messages` 转换为 `input_ids`/`labels`，而不是延迟到 DataCollator 阶段才做（部分早期/简化实现框架会把这一步放在 Collator 里，导致每个 epoch 都要重复做模板拼接的字符串处理，效率较低）。ms-swift 将模板编码提前到 Dataset 层完成，使得该结果可以被 `datasets` 库的缓存机制、以及 `--streaming` 模式下的懒加载迭代器复用，是兼顾正确性与性能的工程选择；DataCollator 层则只负责相对轻量的 batch 内 padding 对齐操作。
 
-### 13.3 与 Megatron-SWIFT 调用链的差异
+### 13.3 Full 参数训练场景的端到端调用链
+
+以 `swift sft --model Qwen/Qwen3-8B --tuner_type full --deepspeed zero3 ...` 为例，结合官方 DeepWiki 对训练管线"从配置解析到 Checkpoint 保存"全链路代码实体的梳理，以及 `swift/plugin/tuner.py` 中公开的 `Tuner` 抽象基类源码（见 13.6 节），Full 参数训练场景下调用链在 13.1 节通用框架的基础上，各关键节点的具体行为如下：
+
+1. **`get_model_processor()` 加载阶段**：以标准精度（`torch_dtype=bfloat16`，或用户指定精度）加载模型权重，**不进行任何量化处理**（量化压缩主要服务于 PEFT 场景下的显存瓶颈，全参数训练场景通常没有意义叠加量化——量化基座本身不可微分更新，与"全部参数都要更新"的诉求直接矛盾）。
+2. **`Tuner.prepare_model(args, model)` 阶段**：`tuner_type=full` 对应的 Tuner 实现在职责上近似于一个"直通（no-op）"策略——它不需要向模型注入任何新增模块，也不需要冻结任何参数，其核心工作是确保 `model.parameters()` 中的每一个张量 `requires_grad=True`（这通常是模型加载后的默认状态，因此该阶段的实际代码逻辑非常轻量），必要时处理 `--freeze_parameters` 参数指定的按前缀冻结（如冻结 embedding 层或前 N 层）。
+3. **优化器构造阶段**：HuggingFace `Trainer.create_optimizer()` 遍历 `model.named_parameters()`，收集其中 `requires_grad=True` 的张量构造参数组——在 Full 场景下这一集合等于模型的**全部**参数，因此 AdamW 优化器需要为每一个参数维护一阶、二阶动量，这正是第五章讨论的"全参数训练优化器状态显存开销远高于 LoRA"的直接代码层面根源。
+4. **DeepSpeed/FSDP 协同阶段**：由于可训练参数量巨大，全参数训练场景通常需要 ZeRO-3（或 FSDP 的 `FULL_SHARD`）将参数本身也切分到多卡，这意味着**前向/反向传播过程中，DeepSpeed 引擎需要在每一层计算前动态地 All-Gather 该层的完整参数分片、计算完成后再释放（release）**，这一过程对每一层都会发生，是 ZeRO-3 通信开销显著高于 ZeRO-2 的直接原因（对应第十章图 10-1）。
+5. **反向传播与梯度同步**：全部参数都会产生梯度，DeepSpeed/FSDP 需要对全部参数的梯度做 Reduce-Scatter（ZeRO-2/3）或 All-Reduce（朴素 DP）操作，通信量与参数总量成正比。
+6. **Checkpoint 保存阶段（`Trainer.save_model()` / `Tuner.save_pretrained()`）**：Full 场景下的保存逻辑等价于标准 HuggingFace `PreTrainedModel.save_pretrained()`——将完整的 `state_dict` 按分片规则（通常每片不超过 5GB）写出为多个 `.safetensors` 文件，并生成 `model.safetensors.index.json` 索引文件；若使用 ZeRO-3，由于参数在保存前散布在各个 rank 上，还需要额外的**权重聚合（Gather）**步骤——DeepSpeed 通过配置项 `zero_optimization.stage3_gather_16bit_weights_on_model_save=true` 在保存时临时将分片参数聚合回单一 rank（或流式聚合写出），这一步骤在超大模型场景下本身就会带来显著的额外显存峰值与耗时，是全参数训练在"训练循环流畅、但保存 Checkpoint 时突然显存吃紧甚至 OOM"这一常见故障现象的根源，工程实践中需要为保存阶段预留额外的显存/时间冗余。
+
+### 13.4 LoRA 训练场景的端到端调用链
+
+以 `swift sft --model Qwen/Qwen3-8B --tuner_type lora --lora_rank 8 --deepspeed zero2 ...` 为例，同一套通用调用链在 LoRA 场景下的具体行为分野如下：
+
+1. **`get_model_processor()` 加载阶段**：若同时配置 `--quant_bits 4`（QLoRA 场景），模型权重会以量化格式（如 bitsandbytes NF4）加载并保持冻结，否则以标准精度加载。
+2. **`Tuner.prepare_model(args, model)` 阶段**：这是 Full 与 LoRA 两条链路**真正意义上的第一个分野点**。LoRA 对应的 Tuner 实现（内部委托给 PEFT 库的 `get_peft_model(model, LoraConfig(...))`，或 ms-swift 自研的等价实现）执行以下具体操作：
+   - 遍历 `--target_modules` 指定的线性层（如 `q_proj/k_proj/v_proj/o_proj` 或 `all-linear` 展开后的全部线性层），将每个匹配到的 `nn.Linear` 模块**替换（Monkey Patch）**为一个 `lora.Linear` 包装模块，该包装模块内部持有原始的冻结权重引用，并新增两个小矩阵 `lora_A`（Kaiming 初始化）、`lora_B`（全零初始化）作为新的可训练子模块；
+   - 将模型中除新增 `lora_A`/`lora_B`（以及用户通过 `--modules_to_save` 显式指定的模块，如 `embed_tokens`/`lm_head`）之外的**全部参数**的 `requires_grad` 置为 `False`（PEFT 库中对应 `mark_only_lora_as_trainable` 或等价的遍历冻结逻辑）；
+   - 若配置了 `--use_dora`/`--use_rslora`/`--init_weights pissa` 等变体开关，在此阶段一并完成对应的初始化策略调整或额外幅度参数（DoRA 的 magnitude vector）的注册。
+   - 返回的 `SwiftModel`（或 PEFT 的 `PeftModel`）包装对象在**前向计算接口上与原始模型完全一致**（`forward()` 签名不变），这是保证 Trainer 层代码"无需感知底层是否为 PEFT 模型"的关键——上层的训练循环代码（第 13.1 节步骤⑤⑥）对 Full 与 LoRA 两种场景**完全复用同一套实现，不需要任何 `if tuner_type == 'lora'` 式的分支判断**，这正是本章 13.6 节要重点分析的"策略模式"设计价值所在。
+3. **优化器构造阶段**：`Trainer.create_optimizer()` 遍历得到的 `requires_grad=True` 参数集合此时仅为 LoRA 新增的 `lora_A`/`lora_B`（及 `modules_to_save` 指定模块），通常只占模型总参数量的 0.1%~5%，AdamW 优化器状态显存开销相应降低 1~2 个数量级。
+4. **DeepSpeed/FSDP 协同阶段**：由于绝大部分参数被冻结、不参与梯度计算，LoRA 场景下通常 **ZeRO-2 已经足够**（切分梯度与优化器状态，二者此时体量都很小），无需 ZeRO-3 承担的"参数切分+动态 All-Gather"额外通信开销；若基座模型本身过大导致单卡装不下（即便冻结也需要占用显存），才需要考虑 ZeRO-3 或量化压缩基座（QLoRA）。这一差异直接解释了第十八章"ZeRO 预设选择依据"中"LoRA 场景优先 ZeRO-2、全参数大模型场景才需要 ZeRO-3"这一工程经验的底层原因。
+5. **反向传播**：需要特别强调一个容易被误解的细节（第六章 6.4 节已提及）——尽管只有 LoRA 分支参数需要计算并保留梯度，但反向传播的计算图仍然必须完整地**流经**所有冻结的中间层（链式法则要求梯度必须逐层向前传播才能到达更早的 LoRA 分支），因此 LoRA 场景下前向/反向传播的**计算量与激活值显存开销**同 Full 场景相比并不会显著减少，真正大幅减少的只是优化器状态与梯度的显存/计算开销。这也是梯度检查点（Gradient Checkpointing）在 LoRA 场景下依然默认开启、依然具有实际意义的原因。
+6. **Checkpoint 保存阶段**：LoRA 场景下的保存逻辑与 Full 场景有本质区别——`Tuner.save_pretrained()` 只序列化 `requires_grad=True` 的新增参数（即 `adapter_model.safetensors`，通常仅几十到几百 MB）与一份记录了 `target_modules`/`lora_rank`/`lora_alpha` 等超参数的 `adapter_config.json`，**完全不触碰、也不需要重新写出冻结的基座权重**。即便叠加 ZeRO-3（如超大模型 + LoRA 的组合场景），需要聚合的也仅是这一小部分 LoRA 参数，保存阶段的显存峰值与耗时因此远低于 Full 场景，这是 LoRA 训练在"频繁保存 Checkpoint 做实验对比"场景下额外的工程效率优势。
+
+![Full与LoRA训练调用链对比时序图](./assets/fig12_full_vs_lora_sequence.svg)
+
+*图 13-2：Full 参数训练与 LoRA 训练共享同一套 CLI 解析、模型/模板/数据加载、训练循环基础设施，仅在 `Tuner.prepare_model()`（参数冻结策略分野）与 Checkpoint 保存（序列化范围分野）两个节点上产生本质差异，二者之间的训练循环主干完全复用。*
+
+### 13.5 两条链路的分野点与汇流点：设计取舍的再审视
+
+将 13.3、13.4 两节的分析并置，可以清晰地识别出 Full 与 LoRA 两条调用链路的**两个分野点**与**一个巨大的汇流区间**：
+
+- **第一分野点（`Tuner.prepare_model()`）**：决定"谁的 `requires_grad` 为 `True`"，这是两条链路在语义上最本质的差异，也是后续优化器构造、DeepSpeed 并行策略选择、反向传播梯度范围的共同"总开关"。
+- **汇流区间（数据加载 → Trainer 构造 → 训练循环 → 评估）**：这是整条调用链中代码量占比最大、最容易出错、也最需要稳定性保证的部分（Template 编码、Collator 拼接、loss_scale 应用、DeepSpeed/FSDP 分布式协调、日志与评估），Full 与 LoRA 两种场景**完全共享同一套实现**，不存在任何差异化代码路径。
+- **第二分野点（Checkpoint 保存）**：决定"序列化哪些参数、以什么格式落盘"，直接决定了产出物的体积、后续 `swift infer`/`swift export` 阶段是否需要"合并"步骤（见第六章 6.3 节）。
+
+这一"分野—汇流—分野"的结构并非偶然，而是**框架设计者主动追求的工程目标**：把"训练范式无关"的能力（数据、模板、分布式协调、训练循环、评估）尽可能沉淀为共享基础设施，把"训练范式相关"的差异**收敛到尽可能少、尽可能薄的两个接缝**（Tuner 注入、Checkpoint 序列化）上。这种设计的直接收益是：新增一种训练方式（如第七、八章介绍的 AdaLoRA、DoRA、LLaMA-Pro 等十余种 Tuner）时，框架维护者只需要在这两个"接缝"处新增对应的 Tuner 实现，而完全不需要触碰、也不需要重新测试训练循环主干代码的正确性——这正是 ms-swift 能够以相对精简的自身代码库支撑十余种微调方式、数百个模型家族的架构基础，也是本报告第十一章"分层设计哲学"中"Template/Tuner/Trainer 三大组件插件式扩展"这一论断在 Full/LoRA 双场景下的具体印证。
+
+### 13.6 工程设计思想解读一：Tuner 抽象与策略模式（Strategy Pattern）
+
+本报告在核实 ms-swift 公开代码片段时，确认了 `swift/plugin/tuner.py` 中存在如下形态的抽象基类定义（字段名与方法签名以调研时可获得的公开代码片段为准）：
+
+```python
+class Tuner:
+
+    @staticmethod
+    def prepare_model(args: 'TrainArguments', model: torch.nn.Module) -> torch.nn.Module:
+        """Prepare a new model with a tuner"""
+        raise NotImplementedError
+
+    @staticmethod
+    def save_pretrained(
+        model: torch.nn.Module,
+        save_directory: str,
+        state_dict: Optional[dict] = None,
+        safe_serialization: bool = True,
+        **kwargs,
+    ) -> None:
+        """Save when save_steps reaches"""
+        raise NotImplementedError
+```
+
+这段代码是理解本章"Full 与 LoRA 为何能共用同一套训练循环"的**关键证据**：`Tuner` 是一个只定义了 `prepare_model` 与 `save_pretrained` 两个静态方法的抽象接口，`tuner_type=full`、`tuner_type=lora`、`tuner_type=adalora`……每一种微调方式都对应一个实现了这两个方法的具体子类（经典的**策略模式 / Strategy Pattern**）。上层的 `SwiftSft.main()` 编排逻辑中，对 Tuner 的调用形如：
+
+```python
+model = TUNER_MAPPING[args.tuner_type].prepare_model(args, model)
+...
+TUNER_MAPPING[args.tuner_type].save_pretrained(model, save_directory, ...)
+```
+
+编排逻辑本身**永远不需要知道**当前具体是哪一种微调方式——它只依赖 `Tuner` 这个抽象接口编程，具体是"什么都不做直接返回"（Full 场景）还是"调用 PEFT 库注入 LoRA 分支"（LoRA 场景）还是"执行 AdaLoRA 的 SVD 参数化注入"，完全由 `TUNER_MAPPING[args.tuner_type]` 这一次多态分发决定。
+
+![Tuner策略模式类图](./assets/fig13_tuner_strategy_pattern.svg)
+
+*图 13-3：`Tuner` 抽象接口与其若干具体实现之间的策略模式关系——调用方只依赖抽象接口，具体行为由 `TUNER_MAPPING` 一次多态分发决定，新增微调方式无需修改任何既有调用方代码。*
+
+这种设计带来两个可验证的工程收益：
+
+1. **开闭原则（Open-Closed Principle）的落地**：新增一种微调方式，只需要新增一个 `Tuner` 子类并注册进 `TUNER_MAPPING`，完全不需要修改 `SwiftSft`、`Trainer`、`Template` 等任何既有代码，从根本上降低了新方法接入对既有稳定功能造成回归（regression）的风险。第七、八章介绍的十余种 PEFT 方法能够以相对一致的用户体验（`--tuner_type xxx` 一个参数切换）快速纳入框架，其架构基础正是这一策略模式。
+2. **面向接口而非面向实现编程**：Trainer、DataCollator、评估逻辑等下游组件只依赖"模型是一个标准 `nn.Module`，其 `forward()` 接口与 HuggingFace 生态兼容"这一契约，完全不关心模型内部是否被 Tuner 修改过、修改了哪些层——这也解释了为何 LoRA 训练可以直接复用第 9 章介绍的 Flash Attention、梯度检查点、NEFTune 等一切与"标准 `nn.Module` 前向计算"相关的通用优化技巧，而不需要为 PEFT 场景单独适配。
+
+需要说明的是：`swift/plugin/tuner.py` 中的这一抽象接口更多承担"面向用户的自定义 Tuner 二次开发入口"角色；框架内置的、更复杂的 LoRA/AdaLoRA 等实现，实际底层大概率是通过 `swift/tuners` 目录下的 `Swift.prepare_model()`（第 15 章已介绍）与 HuggingFace `peft` 库的 `LoraConfig`/`get_peft_model` 协同完成，二者共同构成了"用户可扩展的插件层"与"框架内置的核心实现层"两级 Tuner 体系，但无论哪一层，"以统一抽象接口屏蔽 Full/LoRA/AdaLoRA/... 等具体差异"这一策略模式设计思想是一致的。
+
+### 13.7 工程设计思想解读二：优化器参数分组与"显存画像"的联动设计
+
+13.3、13.4 两节的分析揭示了一个更深层的工程设计逻辑：**Tuner 阶段对 `requires_grad` 的设置，实质上是在为后续所有资源相关的决策"预先埋下一个隐式契约"**。具体而言：
+
+- HuggingFace `Trainer.create_optimizer()` 的实现**并不关心**这个模型是否经过 PEFT 包装，它只是机械地执行 `[p for n, p in model.named_parameters() if p.requires_grad]` 这一遍历过滤逻辑——这意味着 Tuner 阶段"冻结哪些参数"这一个决策，会自动地、无需任何额外代码传导到优化器构造、DeepSpeed ZeRO 参数分片策略、梯度同步通信量等一系列下游环节。这是一种"**单一信任源（Single Source of Truth）**"式的工程设计：`requires_grad` 这一个 PyTorch 原生张量属性，成为了贯穿"模型结构"→"优化器"→"分布式引擎"→"日志监控（可训练参数量统计）"这一整条链路的唯一决策依据，框架不需要在多个模块中重复维护"哪些参数属于 LoRA、哪些属于基座"这类冗余的元信息。
+- 正是由于这一"单一信任源"设计，第十八章提到的"LoRA 场景优先选择 ZeRO-2、全参数大模型场景才需要 ZeRO-3"这一工程经验，本质上不是框架代码里存在什么特殊的 `if lora: use_zero2` 分支判断，而是**用户根据 Tuner 阶段决定的可训练参数量规模，自行做出的资源配置决策**——框架只是忠实地按照 `requires_grad` 的实际分布情况去执行任意配置的 ZeRO 策略，二者是独立解耦的两个决策维度（"训练范式选择"与"分布式并行策略选择"），只是在实践中呈现出符合直觉的相关性（可训练参数少 ⇒ 无需为优化器状态/梯度做过度激进的切分）。这种"决策解耦、行为自动联动"的设计比"框架内置针对特定训练范式的硬编码策略"更具灵活性——例如一个显存极度充裕的用户完全可以在 LoRA 场景下也选择 ZeRO-3（虽然通常没有必要），框架不会加以阻拦。
+
+### 13.8 工程设计思想解读三：Checkpoint 保存的多态实现与"最小充分序列化"原则
+
+Full 与 LoRA 在 `Tuner.save_pretrained()` 上的差异化实现，体现了另一条重要的工程设计思想——**"最小充分序列化"（Minimal Sufficient Serialization）**：Checkpoint 应当只保存"重建当前可训练状态所必需的最小信息集合"，而不是无差别地保存整个模型的完整状态。
+
+- 对 Full 场景，"最小充分"恰好等于"完整模型权重"，因为全部参数都被更新过，任何参数的缺失都会导致无法准确复现训练结果；
+- 对 LoRA 场景，"最小充分"仅仅是新增的 `lora_A`/`lora_B`（及少量 `modules_to_save` 模块）加上一份配置文件（记录 `target_modules`/`rank`/`alpha` 等，用于推理时准确重建注入位置），因为基座权重本身从未被修改，无需也不应该被重复保存。
+
+这一设计原则的价值不仅在于节省磁盘空间，更在于它天然地支撑起了第十五章介绍的**多 Adapter 管理**与第二十章介绍的 **SFT/RLHF 阶段权重复用**（`--adapters`/`--ref_adapters`）——因为 LoRA Checkpoint 本身就是"相对基座模型的一个纯粹增量描述"，多个不同任务/不同阶段训练出的 Adapter 可以自然地共享同一份基座模型权重，在推理或后续训练时按需加载、组合、切换，而不需要框架为"多模型版本管理"专门设计额外的存储去重机制——**LoRA 训练范式的选择，在 Checkpoint 这一层面"免费"带来了模型资产管理的工程便利性**，这是 Full 与 LoRA 两条调用链路差异中，容易被工程师在选型阶段忽视、但在实际多任务/多客户生产场景中价值巨大的一个隐性收益。
+
+### 13.9 与 Megatron-SWIFT 调用链的差异
 
 对于超大规模训练场景，用户使用的是 `megatron sft` 而非 `swift sft` 命令，其底层调用链在"模型加载""并行策略初始化""数据分片""损失计算"等环节均有独立实现（`swift/megatron/trainers/base.py` 中的 `BaseMegatronTrainer` 作为抽象基类，覆盖 SFT 与 RLHF 两类场景）。一个值得关注的细节是：Megatron-SWIFT 内部使用 `get_packed_seq_params`（位于 `swift/megatron/trainers/utils.py`）来支持所谓的 **"thd" 格式的无填充（Padding-Free）训练**——即把一个 batch 内多条变长序列首尾相接打包为一条长序列（"thd" 指 total-tokens/heads/dim 的张量排布方式，是 Flash Attention 变长接口所使用的数据格式），彻底消除 padding token 带来的算力浪费，这与第十四章将详细展开的标准 `swift sft`（非 Megatron 路径）中的 Packing 实现在目标上是一致的，但具体的张量排布与底层 Kernel 依赖有所不同，体现了不同并行策略层级下"消除 padding 浪费"这一优化目标的不同工程实现路径。
 
@@ -840,6 +993,7 @@ Packing 不改变第二章所述的损失掩码逻辑本身——每条被打包
 - **依赖 Flash Attention 的变长接口**：Packing 训练要获得完整的效率收益，通常要求底层 Attention 实现（`--attn_impl flash_attn`）支持变长序列接口，若退化到朴素 `eager` 实现，则需要显式构造块对角掩码矩阵，效率提升会打折扣（甚至因为掩码矩阵本身的显存开销而在某些场景下得不偿失）。
 - **动态打包策略**：具体打包算法（如何决定哪些样本拼接在一起以尽量减少"填不满"造成的剩余空隙）通常采用贪心装箱（Bin Packing）思路的近似算法（如"最先适应/最佳适应"变体），在数据预处理阶段一次性完成打包分组，而不是在每个训练 step 动态重新打包（后者会带来额外的运行时开销，且不利于结合数据缓存机制）。
 - **与 Megatron-SWIFT "thd" 格式的呼应**：前一章提到的 `get_packed_seq_params` 正是 Megatron-SWIFT 场景下对同一思想的实现，二者共享"用 `cu_seqlens` 描述拼接边界、依赖底层 Kernel 的变长接口消除 padding"这一核心技术范式，只是分别服务于标准 Trainer 路径与 Megatron 并行路径。
+- **大规模数据集下的打包耗时问题与缓存机制（本次修订新增）**：社区反馈显示，在超大规模预训练数据（如数亿样本量级）场景下，对全量数据做 tokenize + Packing 预处理本身可能耗时数小时，成为训练启动前的一个显著瓶颈。针对这一问题，官方给出的解决方案是：（1）使用 **`--packing_num_proc`** 参数指定多进程并行打包，缩短一次性预处理耗时；（2）使用 **`cached_dataset`** 机制（参见 `examples/train/cached_dataset` 官方示例）将 tokenize + Packing 后的结果持久化缓存到磁盘，多次实验（如超参数搜索时的重复训练）可以直接复用缓存结果，避免每次启动训练都重新执行一遍完整的预处理流程。这一机制对"数据集固定、仅调整训练超参数"的常见实验场景（详见第二十一章的调参迭代工作流）具有明显的工程提效价值。
 
 ### 14.5 Packing 对超参数选择的连带影响
 
@@ -855,7 +1009,7 @@ Packing 不改变第二章所述的损失掩码逻辑本身——每条被打包
 
 ### 15.1 `Swift.prepare_model()`：统一的 Tuner 注入入口
 
-无论用户通过命令行选择哪一种 `--train_type`，其底层都会归约到同一个核心 API：`Swift.prepare_model(model, config, ...)`。该函数接收一个已加载的 `torch.nn.Module`（基座模型）与一个 Tuner 配置对象（`LoRAConfig`、`AdaLoraConfig`、全参数场景下可能对应一个"空配置"或直接跳过注入），返回一个 `SwiftModel` 包装对象——这一包装对象在推理/前向接口上与原始 `nn.Module` 完全兼容（保证上层训练循环代码无需感知底层是否使用了 PEFT），但内部已经完成了"冻结哪些参数""新增哪些可训练模块""如何在 `state_dict()` 中区分基座权重与新增权重以便分别保存"等一系列职责。
+无论用户通过命令行选择哪一种 `--tuner_type`，其底层都会归约到同一个核心 API：`Swift.prepare_model(model, config, ...)`。该函数接收一个已加载的 `torch.nn.Module`（基座模型）与一个 Tuner 配置对象（`LoRAConfig`、`AdaLoraConfig`、全参数场景下可能对应一个"空配置"或直接跳过注入），返回一个 `SwiftModel` 包装对象——这一包装对象在推理/前向接口上与原始 `nn.Module` 完全兼容（保证上层训练循环代码无需感知底层是否使用了 PEFT），但内部已经完成了"冻结哪些参数""新增哪些可训练模块""如何在 `state_dict()` 中区分基座权重与新增权重以便分别保存"等一系列职责。
 
 ### 15.2 对 PEFT 库的复用与扩展
 
@@ -874,7 +1028,7 @@ Packing 不改变第二章所述的损失掩码逻辑本身——每条被打包
 
 ### 15.5 Tuner 与量化的协同（QLoRA 场景）
 
-当 `--train_type lora` 与 `--quant_bits 4` 同时配置时，Tuner 注入逻辑需要与量化加载逻辑协同工作：模型加载阶段先以指定量化方式（如 bitsandbytes NF4）加载基座权重并保持冻结状态，随后 `Swift.prepare_model()` 在这一量化模型之上挂载标准精度（bf16/fp16）的 LoRA 分支参数，二者的协同正确性（尤其是量化权重与 LoRA 分支之间的数据类型转换、梯度是否被正确阻断在量化权重之外）是 QLoRA 类训练能否正常收敛的关键工程细节，第十六章将结合具体量化方案进一步展开。
+当 `--tuner_type lora` 与 `--quant_bits 4` 同时配置时，Tuner 注入逻辑需要与量化加载逻辑协同工作：模型加载阶段先以指定量化方式（如 bitsandbytes NF4）加载基座权重并保持冻结状态，随后 `Swift.prepare_model()` 在这一量化模型之上挂载标准精度（bf16/fp16）的 LoRA 分支参数，二者的协同正确性（尤其是量化权重与 LoRA 分支之间的数据类型转换、梯度是否被正确阻断在量化权重之外）是 QLoRA 类训练能否正常收敛的关键工程细节，第十六章将结合具体量化方案进一步展开。
 
 ---
 
@@ -905,7 +1059,11 @@ ms-swift 对这两类场景均提供支持，前者对应 `swift sft` 训练阶�
 - **精度损失**：尽管 NF4 等量化方案针对权重的统计分布做了信息论意义上的优化，相比 bf16/fp16 全精度权重仍不可避免存在一定精度损失，在极端敏感任务（如需要精确数值计算的场景）上可能观察到轻微效果下降，但在绝大多数指令遵循、对话类任务上，QLoRA 论文与后续大量复现工作报告的效果损失通常在可接受范围内（部分场景甚至观察不到统计显著的差异）。
 - **量化与合并导出的兼容性**：如第六章所述，若基座为量化权重，LoRA 训练完成后的"合并（merge）"操作通常需要先将量化权重反量化到高精度，再与 LoRA 增量相加，之后可选择保持高精度导出（便于后续再次量化或直接部署）或重新量化为部署格式，ms-swift 的 `swift export --merge_lora true` 命令封装了这一流程细节。
 
-### 16.5 量化方法的选型建议
+### 16.5 量化导出格式的最新支持范围
+
+根据本次修订调研到的最新官方 Quick-start 文档（v4.5.0.dev0），ms-swift 的 `swift export` 量化导出功能目前明确支持 **AWQ、GPTQ、FP8、BNB** 四种量化格式（此前版本的文档与实践更多聚焦于 AWQ/GPTQ/BNB 三种，FP8 是较新增加的导出格式）。FP8（8-bit 浮点，E4M3/E5M2 格式）与 GPTQ/AWQ 等整数量化方案的本质区别在于：FP8 保留了浮点数值的指数位，对数值分布的适应性更好，且与现代 GPU（Hopper/Blackwell 架构）原生的 FP8 Tensor Core 计算单元直接兼容，可以在**推理阶段直接以 FP8 精度参与矩阵运算**（而非像 int4/int8 那样必须先反量化到浮点再计算），因此在支持 FP8 计算的硬件上，FP8 量化导出的模型通常能获得比同等位宽整数量化更好的吞吐-精度平衡。这也与第 18.6 节提到的 Megatron-SWIFT 训练阶段 FP8 支持相互呼应，体现了 FP8 数值精度正从"训练加速"向"推理部署"两端同步渗透的趋势。
+
+### 16.6 量化方法的选型建议
 
 | 场景 | 建议方案 |
 | --- | --- |
@@ -959,7 +1117,7 @@ NPROC_PER_NODE=8 \
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 swift sft \
   --model Qwen/Qwen3-8B \
-  --train_type full \
+  --tuner_type full \
   --dataset '<your_dataset>' \
   --torch_dtype bfloat16 \
   --deepspeed zero2 \
@@ -1028,7 +1186,7 @@ SFT 训练过程中最基础的监控指标是**训练损失（train_loss）**�
 
 ### 19.3 EvalScope 集成
 
-ms-swift 与 ModelScope 生态下的评测框架 **EvalScope** 深度集成，支持在训练完成后（或通过独立的 `swift eval` 命令）对产出模型自动运行标准化评测集，涵盖：
+ms-swift 与 ModelScope 生态下的评测框架 **EvalScope** 深度集成（据官方 Quick-start 文档介绍，EvalScope 作为评估后端支持 **100+ 评测数据集**，覆盖纯文本与多模态模型），支持在训练完成后（或通过独立的 `swift eval` 命令）对产出模型自动运行标准化评测集，涵盖：
 
 - **知识与推理类客观题**：如 MMLU、C-Eval、CMMLU、GSM8K（数学）、HumanEval（代码）等，这类评测通常有标准答案，可以自动化打分，客观性强。
 - **对话质量类主观评测**：如 MT-Bench、AlpacaEval 等采用"LLM-as-a-Judge"范式——用另一个能力更强的模型（如 GPT-4 或同等水位的裁判模型）对被测模型的回复打分或与基准回复做胜率对比，这类评测更贴近真实对话场景的质量感知，但存在裁判模型自身偏见（如偏好更长回复、偏好特定风格）带来的评测偏差风险，需要结合人工抽检交叉验证。
@@ -1054,7 +1212,7 @@ ms-swift 与 ModelScope 生态下的评测框架 **EvalScope** 深度集成，�
 
 ### 20.3 GRPO：面向可验证奖励的强化学习
 
-与 DPO 依赖"人类标注的成对偏好数据"不同，GRPO（Group Relative Policy Optimization，DeepSeek 团队提出，用于 DeepSeekMath 及后续 DeepSeek-R1 系列推理模型训练）面向的是**存在客观、可自动验证的奖励信号**的任务场景（如数学题是否得出正确答案、代码是否通过单元测试）。其核心机制是：对同一问题采样一组（Group）候选回复，根据验证器给出的（通常是稀疏的 0/1 或简单规则打分）奖励，计算组内相对优势（每个候选回复的奖励相对组内均值的偏离程度，并做标准化），以此作为策略梯度更新的优势估计，从而**省去了 PPO 中需要额外训练一个价值网络（Critic）来估计优势函数**这一环节，显著降低了强化学习训练阶段的显存与工程复杂度。GRPO 及同类 RLVR（基于可验证奖励的强化学习）方法是 2024-2026 年推理能力大幅提升（长思维链、自我反思、多步验证等"慢思考"行为的涌现）背后的核心训练技术，ms-swift 通过 `swift rlhf --rlhf_type grpo` 提供原生支持，是该框架紧跟前沿技术演进的又一体现。
+与 DPO 依赖"人类标注的成对偏好数据"不同，GRPO（Group Relative Policy Optimization，DeepSeek 团队提出，用于 DeepSeekMath 及后续 DeepSeek-R1 系列推理模型训练）面向的是**存在客观、可自动验证的奖励信号**的任务场景（如数学题是否得出正确答案、代码是否通过单元测试）。其核心机制是：对同一问题采样一组（Group）候选回复，根据验证器给出的（通常是稀疏的 0/1 或简单规则打分）奖励，计算组内相对优势（每个候选回复的奖励相对组内均值的偏离程度，并做标准化），以此作为策略梯度更新的优势估计，从而**省去了 PPO 中需要额外训练一个价值网络（Critic）来估计优势函数**这一环节，显著降低了强化学习训练阶段的显存与工程复杂度。GRPO 及同类 RLVR（基于可验证奖励的强化学习）方法是 2024-2026 年推理能力大幅提升（长思维链、自我反思、多步验证等"慢思考"行为的涌现）背后的核心训练技术，ms-swift 通过 `swift rlhf --rlhf_type grpo` 提供原生支持，是该框架紧跟前沿技术演进的又一体现。此外，GRPO 训练中"对同一问题采样一组候选回复"这一环节（即 Rollout）本身的推理开销很大，ms-swift 通过 `--use_vllm true --vllm_mode colocate` 等参数支持将 vLLM 推理引擎与训练进程共置（colocate）以加速采样，缓解强化学习训练中"策略采样"与"梯度更新"交替执行带来的 GPU 利用率气泡问题，是 GRPO 类在线强化学习训练能否达到可接受吞吐的重要工程环节。
 
 ### 20.4 SFT 冷启动在推理模型训练中的角色
 
@@ -1167,14 +1325,15 @@ ms-swift 与 ModelScope 生态下的评测框架 **EvalScope** 深度集成，�
 
 ---
 
-## 附录 A：核心命令行参数速查表（以 ms-swift 3.x/4.x 系文档为主要参考）
+## 附录 A：核心命令行参数速查表（以 ms-swift v4.0.0 正式版及 v4.5.0.dev0 开发版文档为主要参考）
 
 ### A.1 通用训练参数
 
 | 参数 | 说明 | 常见默认值/取值 |
 | --- | --- | --- |
 | `--model` | 模型 ID 或本地路径 | 无默认，必填 |
-| `--train_type`（或 `--tuner_type`） | 微调方式 | `lora`（默认）/`full`/`longlora`/`adalora`/`llamapro`/`adapter`/`vera`/`boft`/`fourierft`/`reft` |
+| `--tuner_type` | 微调方式（v2.x/v3.x 曾用 `--sft_type`/`--train_type`，现已统一） | `lora`（默认）/`full`/`longlora`/`adalora`/`llamapro`/`adapter`/`vera`/`boft`/`fourierft`/`reft` |
+| `--tuner_backend` | Tuner 底层实现后端 | `peft`（默认）/`unsloth` |
 | `--dataset` | 数据集，支持多个来源与内联采样 `#N` 语法 | 无默认，必填 |
 | `--torch_dtype` | 训练精度 | `bfloat16`（推荐）/`float16`/`float32` |
 | `--output_dir` | 输出目录 | 默认自动生成 `output/<model>/<version>` |
@@ -1236,18 +1395,19 @@ ms-swift 与 ModelScope 生态下的评测框架 **EvalScope** 深度集成，�
 | `--adapters` | 加载已有 adapter（用于续训或作为 RLHF 初始化） |
 | `--beta` | 偏好优化中控制偏离参考模型程度的核心超参数 |
 
-> 提示：以上参数名与默认值基于本报告调研时可获得的公开文档、Release 说明与社区源码分析整理，ms-swift 项目仍在活跃演进中，具体参数可能随版本更新有所调整（如历史上 `--sft_type` → `--train_type`、`--lora_target_modules` → `--target_modules`、`--quantization_bit` → `--quant_bits` 等命名迁移），建议读者在实际使用前以 `swift sft --help` 或对应版本官方文档为准。
+> 提示：以上参数名与默认值基于本报告调研时可获得的公开文档、Release 说明（含官方 Issue #7250）与社区源码分析整理，ms-swift 项目仍在活跃演进中，具体参数可能随版本更新有所调整（如历史上 `--sft_type` → `--train_type` → `--tuner_type`、`--lora_target_modules` → `--target_modules`、`--quantization_bit` → `--quant_bits` 等命名迁移，以及 v4.0 起 `swift.llm` 拆分为 `swift.template`/`swift.dataset`/`swift.model`/`swift.pipelines` 的目录结构迁移），建议读者在实际使用前以 `swift sft --help` 或对应版本官方文档为准。
 
 ---
 
 ## 附录 B：参考文献与资料来源
 
 ### B.1 框架与工程文档
-1. ModelScope, *ms-swift: Use PEFT or Full-parameter to CPT/SFT/DPO/GRPO 600+ LLMs and 300+ MLLMs*, GitHub 仓库：`https://github.com/modelscope/ms-swift`（含 README、Releases、`docs/source_en/Instruction/` 系列文档、`examples/` 训练脚本示例）。
-2. ms-swift 历史版本文档快照：`swift.readthedocs.io`（v2.x～v4.x 各版本 Command-line-parameters 文档），用于交叉印证参数命名的版本演进。
-3. ms-swift DeepWiki 技术文档梳理（`deepwiki.com/modelscope/ms-swift`），提供调用链路、Trainer/Tuner/Megatron 子系统的结构化说明。
-4. 社区源码分析文章：《【LLM】ms-Swift大模型训练框架源码分析》等公开技术博客，用于交叉验证 `swift sft → sft_main() → SwiftSft(args).main()` 调用链路细节。
-5. Qwen 官方文档中关于 ms-swift 训练 Qwen3 系列模型的实践指南（`qwen.readthedocs.io`）。
+1. ModelScope, *ms-swift: Use PEFT or Full-parameter to CPT/SFT/DPO/GRPO 600+ LLMs and 300+ MLLMs*, GitHub 仓库：`https://github.com/modelscope/ms-swift`（含 README、Releases、`docs/source_en/Instruction/` 系列文档、`examples/` 训练脚本示例、`setup.py` 中 `console_scripts` 入口注册信息）。
+2. ModelScope, *👋Welcome ms-swift v4*, GitHub Issue #7250：`https://github.com/modelscope/ms-swift/issues/7250`，v4.0 重大重构（目录结构拆分、Megatron 训练循环重写、依赖 megatron-core 等）的官方说明与社区讨论，是本次修订章节 11.2/12.1/13.1 订正的直接依据。
+3. ms-swift 历史版本文档快照：`swift.readthedocs.io`（v2.x～v4.5.0.dev0 各版本 Quick-start / Command-line-parameters 文档），用于交叉印证参数命名与目录结构的版本演进。
+4. ms-swift DeepWiki 技术文档梳理（`deepwiki.com/modelscope/ms-swift`），提供调用链路、Trainer/Tuner/Megatron 子系统的结构化说明，包括 `SftArguments`/`RLHFArguments`/`MegatronArguments` 参数类命名、`get_model_processor()`/`get_template()`/`load_dataset()`/`AutoPreprocessor` 等公开 API 的结构化描述。
+5. 社区源码分析文章：《【LLM】ms-Swift大模型训练框架源码分析》等公开技术博客，用于交叉验证 `swift sft → sft_main() → SwiftSft(args).main()` 调用链路细节。
+6. Qwen 官方文档中关于 ms-swift 训练 Qwen3 系列模型的实践指南（`qwen.readthedocs.io`）。
 
 ### B.2 PEFT / LoRA 家族核心论文
 6. Hu, E. J., et al. *LoRA: Low-Rank Adaptation of Large Language Models*. 2021/2022.
@@ -1283,13 +1443,30 @@ ms-swift 与 ModelScope 生态下的评测框架 **EvalScope** 深度集成，�
 32. Taori, R., et al. *Alpaca: A Strong, Replicable Instruction-Following Model*. 2023.
 33. Wang, Y., et al. *Self-Instruct: Aligning Language Models with Self-Generated Instructions*. 2022/2023.
 34. Xu, C., et al. *WizardLM: Empowering Large Language Models to Follow Complex Instructions (Evol-Instruct)*. 2023.
+35. Zhang, S., Dong, L., Li, X., Zhang, S., et al. *Instruction Tuning for Large Language Models: A Survey*. arXiv:2308.10792（v5, 2024 年 12 月更新；配套 GitHub 仓库 xiaoya-li/Instruction-Tuning-Survey 持续滚动更新）。
+36. Han, X., Yang, J., Wang, T., Bi, Z., Song, X., Hao, J., Song, J. *Towards Alignment-Centric Paradigm: A Survey of Instruction Tuning in Large Language Models*. arXiv:2508.17184, 2025.
+37. Wang, J., Zhang, J., Du, Q., Zhang, B., Chu, D. *A Survey on Data Selection for LLM Instruction Tuning*. arXiv:2402.05123, 2024.
+38. Qin, Y., Yang, Y., Guo, P., Li, G., Shao, H., Shi, Y., Xu, Z., Gu, Y., Li, K., Sun, X. *Unleashing the Power of Data Tsunami: A Comprehensive Survey on Data Assessment and Selection for Instruction Tuning of Language Models*. arXiv:2408.02085（*Transactions on Machine Learning Research*）。
+39. Chen, L., et al. *AlpaGasus: Training a Better Alpaca with Fewer Data*. 2024（基于模型打分的质量筛选，ChatGPT 评分范式）。
+40. Li, M., Zhang, Y., Li, Z., Chen, J., Chen, L., Cheng, N., Wang, J., Zhou, T., Xiao, J. *From Quantity to Quality: Boosting LLM Performance with Self-Guided Data Selection for Instruction Tuning*. 2024（IFD 分数）。
+41. Xia, M., Malladi, S., Gururangan, S., Arora, S., Chen, D. *LESS: Selecting Influential Data for Targeted Instruction Tuning*. 2024（基于梯度影响力的数据选择）。
+42. Li, X., Yu, P., Zhou, C., Schick, T., Levy, O., Zettlemoyer, L., Weston, J., Lewis, M. *Self-Alignment with Instruction Backtranslation*. ICLR, 2024.
+43. Zhao, H., Andriushchenko, M., Croce, F., Flammarion, N. *Long is More for Alignment: A Simple but Tough-to-beat Baseline for Instruction Fine-tuning*. arXiv:2402.04833, 2024.
 
-### B.5 偏好对齐与强化学习（延伸参考）
-35. Ouyang, L., et al. *Training language models to follow instructions with human feedback (InstructGPT)*. 2022.
-36. Rafailov, R., et al. *Direct Preference Optimization: Your Language Model is Secretly a Reward Model*. 2023.
-37. Ethayarajh, K., et al. *KTO: Model Alignment as Prospect Theoretic Optimization*. 2024.
-38. Shao, Z., et al. *DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models (GRPO)*. 2024.
-39. DeepSeek-AI. *DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning*. 2025（技术报告，关于 SFT 冷启动与拒绝采样二次 SFT 流程的公开描述）。
+### B.5 参数高效微调综述文献（本次修订新增）
+44. Han, Z., Gao, C., Liu, J., Zhang, J., Zhang, S. Q. *Parameter-Efficient Fine-Tuning for Large Models: A Comprehensive Survey*. arXiv:2403.14608, 2024.
+45. Wang, L., Chen, S., Jiang, L., Pan, S., Cai, R., Yang, S., Yang, F. *Parameter-Efficient Fine-Tuning in Large Models: A Survey of Methodologies*. arXiv:2410.19878（已发表于 *Artificial Intelligence Review*, 2025）。
+46. Mao, Y., Ge, Y., Fan, Y., Xu, W., Mi, Y., Hu, Z., Gao, Y. *A Survey on LoRA of Large Language Models*. *Frontiers of Computer Science*, 19(7), 197605, 2025（预印本 arXiv:2407.11046）。
+47. Yang, M., Chen, J., Zhang, Y., Liu, J., Zhang, J., Ma, Q., Verma, H., Zhang, Q., Zhou, M., King, I., et al. *Low-Rank Adaptation for Foundation Models: A Comprehensive Review*. arXiv:2501.00365, 2024.
+48. Li, Y., Yu, Y., Liang, C., He, P., Karampatziakis, N., Chen, W., Zhao, T. *LoftQ: LoRA-Fine-Tuning-Aware Quantization for Large Language Models*. arXiv:2310.08659, 2023.
+49. Jiang, T., Huang, S., Luo, S., Zhang, Z., Huang, H., Wei, F., Deng, W., Sun, F., Zhang, Q., Wang, D., et al. *MoRA: High-Rank Updating for Parameter-Efficient Fine-Tuning*. arXiv:2405.12130, 2024.
+
+### B.6 偏好对齐与强化学习（延伸参考）
+50. Ouyang, L., et al. *Training language models to follow instructions with human feedback (InstructGPT)*. 2022.
+51. Rafailov, R., et al. *Direct Preference Optimization: Your Language Model is Secretly a Reward Model*. 2023.
+52. Ethayarajh, K., et al. *KTO: Model Alignment as Prospect Theoretic Optimization*. 2024.
+53. Shao, Z., et al. *DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models (GRPO)*. 2024.
+54. DeepSeek-AI. *DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning*. 2025（技术报告，关于 SFT 冷启动与拒绝采样二次 SFT 流程的公开描述）。
 
 > 说明：以上论文列表基于公开检索到的题录信息与摘要片段整理，部分文献的具体发表年份/版本以其正式发布渠道（如 arXiv、会议论文集）为准；本报告在正文中对相关方法的技术原理描述，综合了检索到的论文摘要、相关工作引用片段与后续研究对其思想的转述，力求准确但不排除个别细节存在与原始论文表述的微小出入，建议对关键技术细节有严格依赖的读者，进一步查阅对应论文原文核实。
 

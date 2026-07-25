@@ -10,13 +10,13 @@
   <!-- step boxes -->
   <g font-size="13">
     <rect x="280" y="56" width="440" height="46" rx="8" fill="#f1f5f9" stroke="#64748b" stroke-width="1.5"/>
-    <text x="500" y="84" text-anchor="middle" fill="#1e293b" font-family="monospace">① swift sft --model ... --train_type lora ...</text>
+    <text x="500" y="84" text-anchor="middle" fill="#1e293b" font-family="monospace">① swift sft --model ... --tuner_type lora ...</text>
 
     <rect x="280" y="120" width="440" height="46" rx="8" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
-    <text x="500" y="148" text-anchor="middle" fill="#1d4ed8" font-family="monospace">② swift/cli/sft.py  → 解析参数并转发</text>
+    <text x="500" y="148" text-anchor="middle" fill="#1d4ed8" font-family="monospace">② swift.cli.main:cli_main → 分发子命令</text>
 
     <rect x="280" y="184" width="440" height="46" rx="8" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
-    <text x="500" y="212" text-anchor="middle" fill="#1d4ed8" font-family="monospace">③ sft_main() → TrainArguments 解析</text>
+    <text x="500" y="212" text-anchor="middle" fill="#1d4ed8" font-family="monospace">③ sft_main() → SftArguments 解析</text>
 
     <rect x="230" y="248" width="540" height="46" rx="8" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.5"/>
     <text x="500" y="276" text-anchor="middle" fill="#15803d" font-family="monospace">④ SwiftSft(args).main()  [SwiftPipeline + TunerMixin]</text>
