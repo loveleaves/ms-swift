@@ -1,0 +1,74 @@
+<svg viewBox="0 0 1080 620" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif">
+  <rect width="1080" height="620" fill="#ffffff"/>
+  <text x="540" y="32" text-anchor="middle" font-size="19" font-weight="bold" fill="#1e293b">《Instruction Tuning for Large Language Models: A Survey》内容体系结构</text>
+  <text x="540" y="52" text-anchor="middle" font-size="12" fill="#64748b">arXiv:2308.10792（v10, 2025年10月更新）</text>
+
+  <!-- root -->
+  <rect x="440" y="70" width="200" height="46" rx="8" fill="#1e293b"/>
+  <text x="540" y="98" text-anchor="middle" font-size="13" font-weight="bold" fill="#ffffff">指令微调 / SFT 综述</text>
+
+  <!-- branch boxes row1 -->
+  <g font-size="11">
+    <rect x="20" y="150" width="150" height="56" rx="7" fill="#eff6ff" stroke="#3b82f6"/>
+    <text x="95" y="172" text-anchor="middle" font-weight="bold" fill="#1d4ed8">§2 方法论</text>
+    <text x="95" y="190" text-anchor="middle" font-size="10" fill="#1e3a8a">数据构建两途径+SFT训练目标</text>
+
+    <rect x="190" y="150" width="150" height="56" rx="7" fill="#f0fdf4" stroke="#16a34a"/>
+    <text x="265" y="172" text-anchor="middle" font-weight="bold" fill="#15803d">§3 数据集</text>
+    <text x="265" y="190" text-anchor="middle" font-size="10" fill="#14532d">人工/蒸馏/自我提升/推理</text>
+
+    <rect x="360" y="150" width="150" height="56" rx="7" fill="#fdf4ff" stroke="#a855f7"/>
+    <text x="435" y="172" text-anchor="middle" font-weight="bold" fill="#7e22ce">§4 代表模型</text>
+    <text x="435" y="190" text-anchor="middle" font-size="10" fill="#581c87">InstructGPT→LIMA等22例</text>
+
+    <rect x="530" y="150" width="150" height="56" rx="7" fill="#fff7ed" stroke="#fb923c"/>
+    <text x="605" y="172" text-anchor="middle" font-weight="bold" fill="#c2410c">§5 多模态IT</text>
+    <text x="605" y="190" text-anchor="middle" font-size="10" fill="#7c2d12">数据集+LLaVA等模型</text>
+
+    <rect x="700" y="150" width="150" height="56" rx="7" fill="#fef2f2" stroke="#ef4444"/>
+    <text x="775" y="172" text-anchor="middle" font-weight="bold" fill="#b91c1c">§6 领域应用</text>
+    <text x="775" y="190" text-anchor="middle" font-size="10" fill="#7f1d1d">对话/医疗/代码/写作等</text>
+
+    <rect x="870" y="150" width="190" height="56" rx="7" fill="#f0f9ff" stroke="#0ea5e9"/>
+    <text x="965" y="172" text-anchor="middle" font-weight="bold" fill="#075985">§7 高效微调</text>
+    <text x="965" y="190" text-anchor="middle" font-size="10" fill="#0c4a6e">LoRA/HINT/QLoRA/LOMO/Delta</text>
+  </g>
+
+  <!-- connecting lines row1 -->
+  <g stroke="#94a3b8" stroke-width="1.4" fill="none">
+    <line x1="480" y1="116" x2="95" y2="150"/>
+    <line x1="500" y1="116" x2="265" y2="150"/>
+    <line x1="520" y1="116" x2="435" y2="150"/>
+    <line x1="560" y1="116" x2="605" y2="150"/>
+    <line x1="580" y1="116" x2="775" y2="150"/>
+    <line x1="600" y1="116" x2="965" y2="150"/>
+  </g>
+
+  <!-- §8 evaluation detail -->
+  <rect x="60" y="240" width="480" height="150" rx="8" fill="#f8fafc" stroke="#64748b" stroke-width="1.5"/>
+  <text x="300" y="264" text-anchor="middle" font-size="13" font-weight="bold" fill="#1e293b">§8 评估、分析与批评</text>
+  <text x="80" y="288" font-size="11" fill="#334155">8.1 封闭式评估：MMLU/MATH/GSM8K/BBH/HumanEval/IFEval</text>
+  <text x="80" y="306" font-size="11" fill="#334155">8.2 HELM：广泛覆盖+多指标测量+标准化</text>
+  <text x="80" y="324" font-size="11" fill="#334155">8.3 LLM-as-Judge：AlpacaEval/LC-AlpacaEval/MT-Bench/WildBench</text>
+  <text x="80" y="342" font-size="11" fill="#334155">8.4 低资源指令微调　8.5 小规模数据集(LIMA)</text>
+  <text x="80" y="360" font-size="11" fill="#334155">8.6 评估数据集本身质量　8.7 专有模型模仿批评</text>
+  <text x="80" y="378" font-size="10.5" fill="#b91c1c" font-weight="bold">→ 关键发现：模仿蒸馏≠真实能力追平（Gudibande et al.）</text>
+
+  <!-- §9 role -->
+  <rect x="570" y="240" width="490" height="150" rx="8" fill="#f8fafc" stroke="#64748b" stroke-width="1.5"/>
+  <text x="815" y="264" text-anchor="middle" font-size="13" font-weight="bold" fill="#1e293b">§9 SFT 的角色定位</text>
+  <text x="590" y="288" font-size="11" fill="#334155">9.1.1 vs RLHF：细粒度对齐↑ / 训练复杂不稳定↓</text>
+  <text x="590" y="306" font-size="11" fill="#334155">9.1.2 vs DPO：工程简洁↑ / 依赖离线数据覆盖度↓</text>
+  <text x="590" y="324" font-size="11" fill="#334155">9.1.3 vs 提示工程：零成本即时↑ / 无法内化+不可持久化↓</text>
+  <text x="590" y="342" font-size="11" fill="#334155">9.1.4 SFT持续必要性：冷启动+稳定性+多数任务已足够</text>
+  <text x="590" y="360" font-size="11" fill="#334155">9.2 表层对齐假说：SFT教会"表达"而非注入"能力"</text>
+  <text x="590" y="378" font-size="10.5" fill="#7e22ce" font-weight="bold">→ 与本报告第1、20章论述完全印证</text>
+
+  <!-- bottom note -->
+  <rect x="60" y="410" width="1000" height="70" rx="8" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="560" y="434" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#92400e">本报告第二十二章对照关系</text>
+  <text x="560" y="456" text-anchor="middle" font-size="11.5" fill="#78350f">该综述提供"理论全景+历史脉络+评估体系"，本报告第11~18章提供"ms-swift工程实现深度"，二者互补而非替代</text>
+  <text x="560" y="474" text-anchor="middle" font-size="11" fill="#92400e">局限：工程细节简略／中文生态覆盖有限／分布式训练与Packing等效率工程话题空白（详见22.13节）</text>
+
+  <text x="540" y="610" text-anchor="middle" font-size="1" fill="none"> </text>
+</svg>
