@@ -14,7 +14,6 @@ from dataclasses import asdict
 from datetime import timedelta
 from functools import partial
 from io import BytesIO
-from msgspec import field
 from packaging import version
 from peft.tuners.lora import LoraLayer
 from PIL import Image
@@ -45,7 +44,9 @@ VLLM_LORA_INT_ID = 111
 VLLM_LORA_NAME = 'swift_lora'
 VLLM_LORA_PATH = 'swift_dummy_lora_path'
 
-if is_vllm_available():
+_disable_vllm_import = os.environ.get('SWIFT_DISABLE_VLLM_IMPORT', '').lower() in {'1', 'true', 'yes'}
+if not _disable_vllm_import and is_vllm_available():
+    from msgspec import field
     from vllm.lora.request import LoRARequest
 
     class TensorLoRARequest(LoRARequest):
@@ -140,7 +141,7 @@ def patch_stateless_process_group_for_ipv6():
     if _ipv6_patch_applied:
         return
 
-    if not is_vllm_available():
+    if _disable_vllm_import or not is_vllm_available():
         return
 
     import inspect
@@ -1666,7 +1667,7 @@ def get_even_process_data(trainer, global_data: List[T]) -> List[T]:
 
 def check_vllm_version_ge(min_version: str) -> bool:
     """check if the vllm version is greater than or equal to the minimum version"""
-    if not is_vllm_available():
+    if _disable_vllm_import or not is_vllm_available():
         return False
     import vllm
     vllm_version = vllm.__version__

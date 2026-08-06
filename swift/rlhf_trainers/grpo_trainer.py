@@ -3,21 +3,30 @@
 
 # fmt: off
 # apply patch before importing trl, which may internally reference GuidedDecodingParams
-try:
-    import vllm
-    try:
-        from vllm.sampling_params import GuidedDecodingParams
-    except ImportError:
-        import vllm.sampling_params
+import os as _os
 
-        # removed in https://github.com/vllm-project/vllm/pull/22772
-        vllm.sampling_params.GuidedDecodingParams = vllm.sampling_params.StructuredOutputsParams
-except ImportError:
-    pass
+_disable_vllm_import = _os.environ.get('SWIFT_DISABLE_VLLM_IMPORT', '').lower() in {'1', 'true', 'yes'}
+if not _disable_vllm_import:
+    try:
+        import vllm
+        try:
+            from vllm.sampling_params import GuidedDecodingParams
+        except ImportError:
+            import vllm.sampling_params
+
+            # removed in https://github.com/vllm-project/vllm/pull/22772
+            vllm.sampling_params.GuidedDecodingParams = vllm.sampling_params.StructuredOutputsParams
+    except (ImportError, OSError):
+        pass
 
 # https://github.com/modelscope/ms-swift/pull/8280
 try:
     import trl.import_utils as _trl_import_utils
+    if _disable_vllm_import:
+        # TRL imports its vLLM generation modules while importing GRPOTrainer,
+        # even when the run uses Transformers generation. Allow environments
+        # with an installed but unusable vLLM build to opt out of that import.
+        _trl_import_utils.is_vllm_available = lambda: False
     _orig = _trl_import_utils.is_vllm_ascend_available
     if not isinstance(_orig(), bool):
         _trl_import_utils.is_vllm_ascend_available = lambda: bool(_orig()[0])
