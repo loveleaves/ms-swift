@@ -1,6 +1,6 @@
 # ms-swift GRPO 训练全流程代码分析报告
 
-> 分析对象：当前仓库提交 7749cc643（2026-07-30）<br>
+> 分析对象：初始分析提交 7749cc643；本轮前 24 章源码复核基线 0a24a328d（2026-08-07）<br>
 > 报告定位：面向源码阅读与二次开发，重点解释真实调用链、数据流、算法实现、分布式后端和扩展入口。<br>
 > 分析方法：以静态代码追踪为主，并交叉检查配置、示例与测试；第 25、26 节还包含 Qwen3-1.7B 在当前 8GB GPU 环境的三步实际运行记录。第 27、28 节的 Qwen3.5-35B-A3B Megatron/FSDP2 场景由于当前环境无法运行，严格按源码、官方示例和同架构配置进行推导，不将推导性能当作实测结果。
 
@@ -8,12 +8,14 @@
 
 如果目标是先建立全局认识，建议按以下顺序阅读：
 
-1. 先读第 1～3 节，建立“三条实现路径”和主流程调用链。
+1. 先读第 1～4 节，建立“三条训练循环、多个分布式后端”和主流程调用链。
 2. 再读第 5～10 节，理解一条样本从 prompt 到 loss 的完整生命周期。
-3. 根据实际后端选择第 12、13 或 14 节。
+3. 根据实际后端选择第 12、13 或 14 节：Transformers + FSDP2/DeepSpeed 看第 12 节，Megatron 看第 13 节，Ray Megatron 看第 14 节。
 4. 调参时查第 15、17 节；排错时直接查第 19 节。
 5. 要深入改代码时，从第 20、21 节选择专题和源码入口。
-6. 要部署 Qwen3.5-35B-A3B MoE 时，先读第 27 节的 Megatron 四场景，再读第 28 节的 FSDP2 对应路径与逐项对照。
+6. 要部署 Qwen3.5-35B-A3B MoE 时，先用第 12 节建立通用 FSDP2 心智模型，再读第 27 节的 Megatron 四场景和第 28 节的 FSDP2 对应路径与逐项对照。
+
+读完前 24 节后，读者应能回答五个问题：CLI 参数在哪里被推导或改写；一条 prompt 如何变成 completion、reward、advantage 和 loss；四类 log-prob 分别由谁在何时生成；Transformers/FSDP2、Megatron、Ray 各自负责哪一层；要修改 reward、rollout、loss、分布式同步或 checkpoint 时应从哪个函数开始。
 
 本文以最常用的 Transformers/TRL 路径为主线：
 
@@ -25,7 +27,7 @@ swift rlhf \
   --reward_funcs accuracy format
 ~~~
 
-Megatron 和 Ray Megatron 并非简单包装，而是各自拥有训练循环；本文单独说明它们与主线共享的语义和不同的调度方式。
+FSDP2、DDP 和 DeepSpeed 是 Transformers 主训练循环下的分布式执行后端，不是新的 GRPO 算法实现；Megatron 和 Ray Megatron 才各自拥有训练循环。区分“算法循环”和“参数分片后端”，是阅读本文的第一个关键。
 
 ---
 
@@ -50,9 +52,22 @@ Megatron 和 Ray Megatron 并非简单包装，而是各自拥有训练循环；
 
 但它们不共享同一训练循环，功能覆盖也不完全相同。阅读代码时，首先必须确认自己所在的后端。
 
-### 1.2 GRPO 的真正主循环不是“生成一次、更新一次”
+### 1.2 训练循环与分布式后端是两个正交维度
 
-主线实现把一次较大的 generation batch 做 rollout、奖励和优势计算，然后切成若干训练 micro-batch 放入缓存。由 **steps_per_generation** 控制一次 rollout 覆盖多少优化步，由 **num_iterations** 控制同一批 completion 被复用多少轮。
+最容易产生的误解，是把 FSDP2 与 Megatron 当作同一级别的第四条训练路径。更准确的模型如下：
+
+| 层次 | 可选实现 | 决定什么 |
+|---|---|---|
+| GRPO 训练循环 | Transformers/TRL、Megatron、Ray Megatron | rollout 在何处触发，reward/advantage/loss 如何被调度 |
+| 训练分布式后端 | DDP、DeepSpeed ZeRO、FSDP2；或 Megatron TP/PP/CP/EP | 参数、梯度、优化器状态和计算如何跨卡分布 |
+| rollout 后端 | TransformersEngine、vLLM colocate、vLLM server | completion 在哪里生成、权重如何同步、KV cache 占用哪里 |
+| 参数更新方式 | full、LoRA/QLoRA | 训练参数集合、reference 来源、同步全量权重还是 adapter |
+
+因此 `Transformers + FSDP2 + vLLM server + LoRA` 是一个完整组合：GRPO 编排仍由 `GRPOTrainer` 完成，FSDP2 只改变模型状态的保存形式和前反向通信，vLLM server 只承担 rollout，LoRA 决定可训练参数与 reference 语义。
+
+### 1.3 GRPO 的真正主循环不是“生成一次、更新一次”
+
+主线实现把一次较大的 generation batch 做 rollout、奖励和优势计算，然后切成若干训练 micro-batch 放入缓存。`steps_per_generation` 直接控制的是一批 rollout 覆盖多少次 Trainer `training_step`/micro-step；`num_iterations` 控制同一批 completion 被复用多少轮。只有当 `gradient_accumulation_steps=1` 时，一个 micro-step 才恰好等于一个 optimizer/global step。
 
 因此调试时要区分：
 
@@ -61,9 +76,11 @@ Megatron 和 Ray Megatron 并非简单包装，而是各自拥有训练循环；
 - iteration：同一 rollout 数据被策略重复消费；
 - gradient accumulation step：Trainer 内部的梯度累积。
 
+源码中还存在两个不同计数器：`GRPOTrainer._step` 每次前向/反向 micro-step 增加，用于决定何时重新 rollout；`TrainerState.global_step` 仅在优化器真正更新后增加，用于 checkpoint、日志以及判断 vLLM 是否已加载当前策略版本。后文所有“step”若未特别说明，都会明确是哪一种。
+
 这些量混为一谈，会直接造成对吞吐、off-policy 程度、权重同步频率和日志步数的误判。
 
-### 1.3 最重要的数据设计：先保留原始 messages，rollout 后再编码
+### 1.4 最重要的数据设计：先保留原始 messages，rollout 后再编码
 
 GRPO 数据集不会像普通 SFT 那样在进入 Trainer 前统一 token 化。样本在 rollout 前保持为标准 messages 和额外字段，生成完成后才把精确的 response token ID 与 loss mask 注入模板编码。
 
@@ -74,7 +91,7 @@ GRPO 数据集不会像普通 SFT 那样在进入 Trainer 前统一 token 化。
 3. 训练 token 与 vLLM 实际采样 token 对齐，避免字符串解码再编码造成漂移；
 4. 可保留 rollout log-prob，用于训练/推理偏差诊断和重要性采样修正。
 
-### 1.4 必须分清四类逐 token 概率
+### 1.5 必须分清四类逐 token 概率
 
 | 名称 | 产生时机 | 是否有梯度 | 主要用途 |
 |---|---|---:|---|
@@ -110,7 +127,24 @@ GRPO 数据集不会像普通 SFT 那样在进入 Trainer 前统一 token 化。
 | 多轮调度 | [swift/rollout/agent_loop.py](../../swift/rollout/agent_loop.py) | 多轮 agent/environment 循环 |
 | Gym 环境 | [swift/rollout/gym_env.py](../../swift/rollout/gym_env.py) | Env 接口、环境注册与 total_reward |
 
-### 2.2 Megatron 与 Ray
+### 2.2 Transformers/FSDP2 专项地图
+
+| 生命周期 | 关键文件/函数 | FSDP2 作用 |
+|---|---|---|
+| 参数归一化 | [swift/arguments/sft_args.py](../../swift/arguments/sft_args.py) | `--fsdp fsdp2` 解析、设置 FSDP version、检查 device_map/DeepSpeed/checkpoint 冲突 |
+| 默认配置 | [swift/config/fsdp2.json](../../swift/config/fsdp2.json) | FULL_SHARD、transformer auto-wrap、reshard、activation checkpoint、sharded state dict |
+| Trainer/Accelerate 边界 | `transformers.Trainer`、`accelerate` | 创建 DeviceMesh、把主策略的普通 Parameter 转成 DTensor 并包装 FSDP units |
+| 辅助模型包装 | [swift/rlhf_trainers/rlhf_mixin.py](../../swift/rlhf_trainers/rlhf_mixin.py)、[prepare_fsdp](../../swift/rlhf_trainers/utils.py) | 冻结并包装独立 reference/reward model；FSDP2 调用 Accelerate 的准备逻辑 |
+| rollout 能力检查 | [RolloutTrainerMixin.__init__](../../swift/rlhf_trainers/rollout_mixin.py) | 识别 `accelerator.is_fsdp2`；当前 rollout 路径明确拒绝 FSDP1 |
+| 权重分组 | `split_batches` | 按 transformer layer、embedding/head、多模态模块分组，降低全量 materialize 峰值 |
+| 全量权重同步 | `_collect_state_dict_for_vllm`、`_load_state_dict_to_vllm` | 对 DTensor 执行 `full_tensor()`，分组/分桶传给 colocate 或 external vLLM |
+| LoRA 同步 | `_move_adapter_to_vllm`、`_merge_lora_into_state_dict` | 原生 LoRA 传 adapter；否则在完整 tensor 上做矩阵合并，规避 DTensor unmerge 问题 |
+| colocate 内存切换 | `offload_context`、`offload_model`、`offload_optimizer` | rollout 前后在 GPU/CPU 间切换 FSDP2 模型和 optimizer state |
+| checkpoint | HF Trainer + Accelerate FSDP plugin | 以 SHARDED_STATE_DICT 为默认保存/恢复语义 |
+
+这里列出的部分函数属于 `rollout_mixin.py` 内部方法。它们不是 GRPO 公式的一部分，而是“分片训练模型如何变成 rollout 引擎可消费的最新策略”的适配层。第 12 节给出完整时序，第 28 节再落到 Qwen3.5-35B-A3B 场景。
+
+### 2.3 Megatron 与 Ray
 
 | 路径 | 关键文件 | 作用 |
 |---|---|---|
@@ -132,9 +166,9 @@ GRPO 数据集不会像普通 SFT 那样在进入 Trainer 前统一 token 化。
 ~~~mermaid
 flowchart TD
     A["swift rlhf --rlhf_type grpo"] --> B["CLI 路由与分布式启动"]
-    B --> C["SwiftRLHF.run"]
-    C --> D["加载并标准化原始数据集"]
-    C --> E["准备 policy / ref / reward model / template"]
+    B --> C["构造 SwiftRLHF"]
+    C --> E["__init__: policy / ref / reward / template"]
+    C --> D["run: 加载并标准化原始数据集"]
     D --> F["TrainerFactory 创建 GRPOTrainer"]
     E --> F
     F --> G["RepeatSampler: 每个 prompt 重复 G 次"]
@@ -175,24 +209,31 @@ flowchart TD
 - 可选 CHORD SFT 数据集；
 - GRPO 使用的训练模板状态。
 
-[SwiftSft.run](../../swift/pipelines/train/sft.py#L194) 的大体顺序是：
+[SwiftRLHF](../../swift/pipelines/train/rlhf.py#L35) 的构造与 `run()` 必须分开理解。真实顺序是：
 
-1. 准备数据集；
-2. 保存解析后的参数；
-3. 准备模型、tokenizer 和 tuner；
-4. 由 TrainerFactory 选择 GRPOTrainer 和 GRPOConfig；
-5. 构造 Trainer；
-6. 执行 trainer.train；
-7. 保存状态和最终 checkpoint。
+1. `SwiftPipeline.__init__` 解析 dataclass 参数并设置 rank 相关随机种子；
+2. `SwiftSft.__init__` 调用 RLHF 覆盖后的模型准备逻辑，加载 policy、必要的独立 reference/reward model 和 processor；
+3. 初始化 template，并把模型/模板等常驻对象挂到 pipeline；
+4. 进入 [SwiftSft.run](../../swift/pipelines/train/sft.py#L194)，才准备 train/eval dataset；
+5. 保存 post-init 后的最终参数；
+6. `prepare_model()` 冻结 full 参数或注入 LoRA/QLoRA 等 tuner；模型本体并不是到这里才首次加载；
+7. `TrainerFactory` 将 `rlhf_type=grpo` 映射为 `GRPOTrainer` 和 `GRPOConfig`；
+8. 构造 Trainer，准备 reference、reward、rollout engine 和 sampler；
+9. `trainer.train()` 进入 HF Trainer 训练循环，在这里创建 optimizer、包装主策略的 DDP/ZeRO/FSDP2 执行形态；
+10. 保存 Trainer 状态和最终 checkpoint。
+
+这个顺序解释了两个常见现象：一是模型下载或量化 OOM 可能发生在“Preparing model”日志之前；二是 FSDP2 的主 policy 不是在 pipeline 加载模型时就变成 DTensor，而是在 HF Trainer/Accelerate 开始训练准备时才完成分片包装。
 
 ### 3.4 Trainer 的继承关系
 
 [GRPOTrainer](../../swift/rlhf_trainers/grpo_trainer.py#L73) 的继承结构为：
 
 ~~~text
-RolloutTrainerMixin
-    + SwiftMixin
-    + trl.GRPOTrainer
+GRPOTrainer(
+    RolloutTrainerMixin,   # rollout、vLLM、权重同步、offload
+    SwiftMixin,            # Swift 模板/模型/日志/保存适配
+    trl.GRPOTrainer        # HF Trainer 基础设施
+)
 ~~~
 
 它删除并覆盖了上游的部分方法，用 Swift 的模型/模板/日志/rollout 行为包裹 TRL Trainer。可以这样理解职责边界：
@@ -201,6 +242,46 @@ RolloutTrainerMixin
 - SwiftMixin：Swift 模型生态、模板、回调、指标和保存适配；
 - RolloutTrainerMixin：推理后端、权重同步、生成和多轮调度；
 - Swift GRPOTrainer：奖励、优势、逐 token loss、GRPO 扩展算法。
+
+构造期的关键调用链为：
+
+~~~text
+GRPOTrainer.__init__
+  → _prepare_algorithm_params
+  → super().__init__
+      → TRL/HF Trainer 初始化 Accelerator、dataloader 基础设施
+      → RLHFTrainerMixin 准备独立 reference/reward model
+  → _prepare_chord_dataset
+  → prepare_rollout
+      → _prepare_rollout_params
+      → _prepare_scheduler / _prepare_vllm / _prepare_async_generate
+      → split_batches（记录后续权重同步分组）
+  → _prepare_rewards
+  → _prepare_liger_loss / _prepare_metrics
+  → use_vllm=false 时创建 TransformersEngine
+  → 初始化 _step、_buffered_inputs
+~~~
+
+这里存在一个刻意的时序边界：rollout engine 和权重同步分组在 Trainer 构造期准备；主 policy 的 FSDP2 包装由 HF Trainer 在 `train()` 准备模型/优化器时完成。独立 full-tuning reference 若存在，则由 `RLHFTrainerMixin` 先冻结并通过 `prepare_fsdp` 包装。后续 `_collect_state_dict_for_vllm` 面对的才是 DTensor 状态。
+
+### 3.5 训练期的五层调用栈
+
+从一次 HF `training_step` 向内看，调用关系可以压缩为：
+
+~~~text
+HF Trainer.training_step                         # 训练调度层
+  → GRPOTrainer._prepare_inputs                   # rollout/cache 调度层
+      → _generate_and_score_completions           # 轨迹构造层
+          → _generate_completions / _score_completions
+          → _prepare_batch_inputs / _compute_advantages
+  → GRPOTrainer.compute_loss
+      → _compute_loss_and_metrics                 # GRPO 算法层
+          → policy forward / _get_per_token_logps # 模型执行层
+  → Accelerator.backward                         # DDP/ZeRO/FSDP2 分布式层
+  → optimizer.step（达到 accumulation 边界时）
+~~~
+
+二次开发时应先判断改动属于哪一层。奖励函数不应操作 FSDP2 DTensor；权重同步不应重写 advantage；新的 loss 不应绕开 Trainer 的 gradient accumulation。按层定位能显著减少跨后端回归。
 
 ---
 
@@ -238,6 +319,8 @@ GRPO 的 dataclass 初始化会主动推导和校验配置。最关键逻辑位�
 - G：num_generations；
 - GB：普通全局训练 batch，GB = B × D；
 - R：一次 rollout 的全局 generation batch，R = GB × S。
+- A：gradient_accumulation_steps；
+- I：num_iterations。
 
 约束：
 
@@ -246,7 +329,7 @@ generation_batch_size = per_device_train_batch_size × world_size × steps_per_g
 generation_batch_size % num_generations = 0
 ~~~
 
-因此一次 rollout 中不同 prompt 的数量约为 R / G。
+若 `generation_batch_size` 和 `steps_per_generation` 都未显式设置，post-init 会令 `S=A`，于是默认一批 rollout 恰好覆盖一个 optimizer step 所需的 micro-step 数；显式设置 S 后则不再保证这一关系。因此一次 rollout 中不同 prompt 的数量约为 R / G。
 
 例：D=8、B=2、S=4、G=8，则：
 
@@ -256,7 +339,17 @@ R  = 16 × 4 = 64 completions
 prompt 数 = 64 / 8 = 8
 ~~~
 
-这 64 个 completion 会被切成 S 个全局训练 batch；若 num_iterations 大于 1，还会被重复用于更多优化步。
+这 64 个 completion 会被切成 S 个全局训练 batch；若 `num_iterations=I`，会形成约 `S × I` 次 `training_step` 消费。对应 optimizer 更新数约为 `(S × I) / A`，还要受 epoch 末尾、不整除批次和 Trainer 调度影响，不能把 S 直接称为“优化步数”。
+
+源码计数关系：
+
+~~~text
+GRPOTrainer._step  : 每个 training_step/micro-step +1
+Trainer.global_step: 每个 optimizer.step +1
+generate_every     : steps_per_generation × sequence_parallel_size × num_iterations
+~~~
+
+`_prepare_inputs` 使用 `_step % generate_every` 选择生成新 rollout 还是读取 `_buffered_inputs`；vLLM 权重版本判断则使用 `state.global_step`。因此 gradient accumulation 期间可以多次前反向，但 vLLM 不会把每个尚未 optimizer update 的中间梯度状态当作新策略同步。
 
 ### 4.3 重要兼容性约束
 
@@ -268,6 +361,35 @@ prompt 数 = 64 / 8 = 8
 - Liger 路径当前不支持 delta、sequence parallel、padding-free、entropy mask、off-policy sequence mask 等若干功能；
 - REAL 强制关闭 reward normalization；
 - cached_dataset/cached_val_dataset 不支持 GRPO，因为 rollout 后编码依赖训练期动态生成结果。
+
+### 4.4 `--fsdp fsdp2` 的参数改写与约束
+
+[SFTArguments 的 FSDP 初始化](../../swift/arguments/sft_args.py) 会把简写 `--fsdp fsdp2` 映射到 [swift/config/fsdp2.json](../../swift/config/fsdp2.json)，并设置 FSDP version 2。默认配置的核心语义是：
+
+~~~json
+{
+  "fsdp": "full_shard auto_wrap",
+  "fsdp_config": {
+    "fsdp_version": 2,
+    "reshard_after_forward": true,
+    "auto_wrap_policy": "TRANSFORMER_BASED_WRAP",
+    "cpu_ram_efficient_loading": true,
+    "state_dict_type": "SHARDED_STATE_DICT",
+    "activation_checkpointing": true
+  }
+}
+~~~
+
+参数阶段会提前阻止或改写这些组合：
+
+- FSDP2 不能再与 DeepSpeed 同时启用；二者都是主模型分片后端；
+- 不能依赖 `device_map` 做单进程模型并行；FSDP2 要求每个分布式 rank 参与同一个 mesh；
+- `save_only_model=true` 与默认 `SHARDED_STATE_DICT` 不兼容，因为分片恢复还需要对应状态语义；
+- 同时请求普通 gradient checkpointing 与 FSDP activation checkpointing 时，会关闭前者并提示，避免同一层重复 checkpoint；
+- rollout mixin 当前仅支持 FSDP2，检测到 FSDP1 会直接抛错；
+- `cpu_ram_efficient_loading` 只优化多 rank 初始加载，不等价于训练期间 `offload_model` 或 FSDP CPU offload。
+
+这些检查发生在模型训练之前。若启动即失败，应先查看最终 `args.json` 和参数 post-init 日志，而不是进入 GRPO loss 排查。
 
 ---
 
@@ -330,6 +452,20 @@ prompt 数 = 64 / 8 = 8
 
 它解决的不是普通的数据增强，而是 GRPO 的统计前提：同一 prompt 的 G 个结果必须能被 reshape 或按 prompt_id 重组，才能计算组均值和组标准差。
 
+### 5.5 数据对象的所有权边界
+
+| 对象 | 主要创建者 | 生命周期/消费者 | 分布式关注点 |
+|---|---|---|---|
+| 原始 `messages`/额外列 | dataset pipeline | sampler、rollout、reward | 不应被 `remove_unused_columns` 删除 |
+| `prompt_id`/`request_id` | `GRPOTrainer._generate_completions` | rollout、多轮分组、日志 | 跨 rank gather 后仍要唯一且可重组 |
+| `response_token_ids` | rollout engine | template encode、completion mask、loss | 以真实采样 ID 为准，不能只依赖文本 |
+| `rewards_per_func` | reward 层 | `_compute_advantages`、metrics | 各 rank 结果需按全局 completion 顺序聚合 |
+| `old/ref/rollout logps` | policy/ref/rollout | loss 与 off-policy 修正 | token 长度、padding 与 SP 切片必须一致 |
+| `advantages` | `_compute_advantages` | 每个训练 micro-batch | sequence 标量，在 token 维广播 |
+| FSDP2 DTensor 参数 | Accelerate/FSDP2 | policy forward/backward、checkpoint、vLLM sync | 普通 loss 只看到模型输出；仅同步/保存层需要 materialize |
+
+GRPO 的数据层和 FSDP2 参数层在正常训练前向中是解耦的：dataset 不需要知道参数如何分片，reward 也不应直接接触模型权重。真正的交点只有 policy/ref forward、checkpoint 和向 rollout engine 同步权重。
+
 ---
 
 ## 6. rollout：从 prompt 到 completion
@@ -378,6 +514,8 @@ RolloutTrainerMixin 会构造统一的 RequestConfig，包含 max_tokens、tempe
 
 生成前，策略权重被同步到 vLLM；生成结束后再 sleep 并恢复训练资源。LoRA 可选择只同步 adapter，full tuning 或特定场景会做全量权重同步。
 
+在 FSDP2 下，不能把每个 rank 手中的 local shard 直接交给 vLLM。所有 FSDP rank 必须共同参与 `DTensor.full_tensor()` collective，按 `split_batches` 记录的层分组逐批 materialize 完整参数，再由对应 colocate engine 加载。`move_model_batches` 越大，单批参数更少、峰值更低，但 collective/加载次数更多。
+
 ### 6.4 server 模式
 
 训练主进程通过 [VLLMClient](../../swift/rlhf_trainers/vllm_client.py) 连接一个或多个 swift rollout 服务：
@@ -389,6 +527,8 @@ RolloutTrainerMixin 会构造统一的 RequestConfig，包含 max_tokens、tempe
 5. 通过 NCCL/PyNccl 或相应通信后端传输新权重。
 
 外部服务入口位于 [swift/pipelines/infer/rollout.py](../../swift/pipelines/infer/rollout.py)，包含服务 API 和 WeightSyncWorkerExtension。
+
+FSDP2 external 模式中，只有训练主进程负责把完整权重发送给 server，但其他 FSDP rank 不能提前跳过：它们仍需参加 `full_tensor()`。默认会把权重压平并按约 512 MiB bucket 传输，可用 `SWIFT_UPDATE_WEIGHTS_BUCKET_SIZE` 调整。这是“只有 rank 0 发网络请求”与“所有 rank 都参与参数聚合”两个不同层次。
 
 ### 6.5 async_generate 的准确含义
 
@@ -423,6 +563,21 @@ trajectory start
 - num_turns 等轨迹信息。
 
 环境观察通常可通过 loss mask 排除，保证只对模型动作 token 计算策略 loss。所有分布式 rank 必须一致结束，以防 collective 通信死锁。
+
+### 6.7 rollout 是一次策略版本屏障
+
+同步 rollout 的概念时序是：
+
+~~~text
+optimizer 形成策略版本 k
+  → 必要时把版本 k 同步给 rollout engine
+  → 固定版本 k 生成一批 completion
+  → policy(k) no_grad 计算 old log-prob
+  → 对这批数据执行若干 micro-step，得到版本 k+1、k+2...
+  → 到下一个 rollout 边界再同步最新 global_step 版本
+~~~
+
+`_last_loaded_step` 记录 rollout engine 已加载的 `global_step`，避免 gradient accumulation 内或同一策略版本重复传输。FSDP2 只改变“版本 k 如何从 shards 还原后传输”，不改变这个算法屏障。异步生成则有意放宽屏障，让 rollout 可能使用较旧版本，必须结合 rollout log-prob 和 ESS 监控陈旧度。
 
 ---
 
@@ -563,6 +718,20 @@ ratio = exp(log_ratio)
 - LoRA merge、量化、MoE 路由等实现差异。
 
 代码可记录 KL、PPL、chi-square、ESS 等指标，也可用 token/sequence truncate 或 mask 做重要性采样修正。
+
+### 8.3 张量形状与计算位置
+
+设本地 batch 为 `B`，completion 对齐后的最大 token 数为 `T`：
+
+| 张量 | 典型形状 | 计算位置 | 梯度 |
+|---|---|---|---:|
+| `completion_mask` | `[B, T]` | template encode/collate 后 | 否 |
+| `advantages` | `[B]`，loss 时扩为 `[B, 1]` | 全局 reward 分组后再切回本地 | 否 |
+| `old/ref/rollout_per_token_logps` | `[B, T]` | rollout 准备期 | 否 |
+| `per_token_logps` | `[B, T]` | 每次 policy 训练前向 | 是 |
+| `per_token_loss` | `[B, T]` | `_compute_loss_and_metrics` | 是 |
+
+FSDP2 forward 时，每个 FSDP unit 在需要计算时 all-gather 参数，得到 logits 后再 reshard；`_get_per_token_logps` 和 GRPO loss 仍处理普通局部激活张量，并不需要显式理解 DTensor。换言之，新增 reward/advantage/loss 通常不应调用 `full_tensor()`；只有 vLLM 同步和某些保存流程需要完整参数。
 
 ---
 
@@ -709,12 +878,27 @@ mask 的先后顺序会影响有效 token 数和归一化分母。新增算法�
 
 一次 _generate_and_score_completions 返回多个已编码 micro-batch，并存入 _buffered_inputs。之后 _prepare_inputs 按 step 取切片。
 
-- steps_per_generation 决定一批 rollout 被切成多少训练 step；
+- steps_per_generation 决定一批 rollout 被切成多少 Trainer micro-step，而不保证等于 optimizer step；
 - num_iterations 决定同一批数据被复用多少轮；
 - 使用旧样本越多，current 与 old 的差异通常越大，clip ratio 和 off-policy 指标更重要；
-- 权重只需在真正生成新 rollout 前同步到 vLLM，避免每个 gradient accumulation 子步重复传输。
+- `_step` 按 micro-step 推进，`global_step` 按 optimizer update 推进；
+- 权重只需在真正生成新 rollout且 `global_step` 已变化时同步到 vLLM，避免每个 gradient accumulation 子步重复传输。
 
-### 10.7 DAPO 相关机制
+### 10.7 算法层与分布式层如何接合
+
+忽略可选 mask 后，一个 batch 的逻辑可以写成：
+
+~~~text
+model shards --FSDP2 all-gather per unit--> logits
+logits → current token log-probs
+current/old/ref + advantages → per-token GRPO/KL loss
+masked normalization → local scalar loss
+backward → reduce-scatter gradients → sharded optimizer update
+~~~
+
+FSDP2 保持 GRPO 公式不变，但改变执行和状态所有权：参数、梯度、optimizer state 处于分片状态；激活、completion mask、advantage 通常仍按 data-parallel rank 本地持有；DAPO 等全局 token 分母通过 collective 汇总。新增算法若只依赖 logits/mask，应保持后端无关；若读取 `named_parameters()`、做全参数范数或把权重送往外部组件，则必须显式处理 DTensor。
+
+### 10.8 DAPO 相关机制
 
 - dynamic_sample：组内 reward std 为 0 时丢弃该组并重新采样，最多 max_resample_times；
 - overlong_filter：completion 因长度上限被截断时，不让其 token 进入策略 loss；
@@ -730,10 +914,12 @@ dynamic_sample 提升有效梯度比例，但也改变真实采样分布并增�
 
 ### 11.1 ref model 的来源
 
-- full tuning：默认需要一份冻结参考模型；未显式给 ref_model 时，pipeline 可从策略初始权重构造；
-- LoRA：通常不复制完整模型，而是在计算 ref log-prob 时禁用 adapter，使用冻结基座；
-- beta=0：不需要 ref log-prob，能节省显存与计算；
-- ref_adapter 可指定专用参考 adapter。
+| 更新方式 | `beta=0` | `beta>0` 的 reference 来源 | FSDP2 含义 |
+|---|---|---|---|
+| full | 不加载 reference，也不计算 ref log-prob | 独立冻结模型；未显式设置时通常与 policy 初始模型同源 | 独立 reference 也需按 FSDP2 包装，否则每 rank 保留完整副本会失去分片收益 |
+| LoRA/QLoRA | 不需要 reference 前向 | 同一 policy 暂时禁用 adapter，使用冻结基座；也可按支持范围配置 ref adapter | 无第二份完整基座；在同一分片模型上切换 adapter 上下文 |
+
+`beta=0` 的判断发生在参数初始化期，可在 full tuning 时真正避免构造第二份模型。reference 始终 `eval()`、不参与 optimizer；“冻结”不代表“必须每卡完整复制”，所以 `RLHFTrainerMixin` 会在 FSDP 场景通过 [prepare_fsdp](../../swift/rlhf_trainers/utils.py) 包装独立 reference。该 helper 会先冻结/eval 再执行 FSDP2 准备，避免仅推理模型被不必要地上转为 FP32。
 
 ### 11.2 sync_ref_model
 
@@ -747,37 +933,155 @@ ref ← (1 - alpha) × ref + alpha × policy
 
 ### 11.3 训练权重到 vLLM 的同步
 
-[rollout_mixin.py](../../swift/rlhf_trainers/rollout_mixin.py#L449) 区分：
+[rollout_mixin.py](../../swift/rlhf_trainers/rollout_mixin.py#L449) 先决定同步策略：
 
 - full training：全量参数；
-- LoRA 且 vLLM 原生 LoRA 可用：只传 adapter；
-- 需要 merge 的 PEFT：临时 merge/unmerge；
+- LoRA 首次同步、sleep level 2 唤醒后、或 vLLM 原生 LoRA 不可用：发送完整/已合并状态；
+- LoRA 且 vLLM 原生 LoRA 可用、基座已就绪：只传 adapter；
 - ZeRO-3：先 gather 参数；
-- FSDP2：取 full tensor；
+- FSDP2：从 DTensor 取 `full_tensor()`；
 - MoE：处理专家参数和可能的路由重放；
 - server：可按 bucket 分块并传输 flattened weights；
 - colocate：直接把状态加载进本地 vLLM engine。
 
-_last_loaded_step 用于避免同一个训练 step 内重复同步。遇到“生成结果没有随训练变化”时，优先检查权重同步 step、adapter 名称、merge 状态和 server 通信，而不是先怀疑优化器。
+FSDP2 全量同步的实际路径为：
+
+~~~text
+_move_model_to_vllm
+  → 遍历 split_batches 生成的参数组
+  → _collect_state_dict_for_vllm
+      → model.state_dict()               # 不直接使用 sharded named_parameters
+      → 每个 DTensor.full_tensor()        # 全体 FSDP rank 参与 collective
+      → 可选 _merge_lora_into_state_dict  # 在完整 tensor 上做 B @ A × scaling
+  → _load_state_dict_to_vllm
+      → colocate: engine.load_weights
+      → server: rank 0 分桶发送
+  → finish/process weights
+  → reset prefix/encoder cache
+~~~
+
+FSDP2 + LoRA 不能可靠地沿用普通 PEFT 的 merge→unmerge 原地修改流程，因为 shard/DTensor 上的 unmerge 语义不可靠。Swift 在需要非原生 LoRA 同步时，对收集出的完整 tensor 计算 `(lora_B @ lora_A) × scaling`，不会改变训练侧分片基座。原生 vLLM LoRA 路径则只收集 adapter DTensor 的完整值。
+
+`_last_loaded_step` 记录的是 optimizer `global_step` 版本，不是每个 micro-step。遇到“生成结果没有随训练变化”时，应依次检查：是否到新 rollout 边界、global step 是否已更新、adapter 名称/加载方式、full-tensor collective、server 已处理的权重版本及 cache reset，而不是先怀疑优化器。
 
 ---
 
-## 12. Transformers 路径的分布式与内存模型
+## 12. Transformers 路径的分布式、FSDP2 与内存模型
 
-### 12.1 DDP / DeepSpeed / FSDP
+### 12.1 后端选择：DDP、ZeRO-3、FSDP2 与 Megatron
 
-HF Trainer/Accelerate 负责数据并行与优化器状态分片；Swift 在 rollout 阶段额外处理：
+HF Trainer/Accelerate 负责主模型的分布式包装；Swift 在 GRPO 层额外负责请求/奖励 gather、全局 token normalizer、辅助模型包装，以及把训练权重变成 rollout engine 可加载的形式。
 
-- 收集各 rank 请求；
-- 广播生成结果与奖励统计；
-- ZeRO-3/FSDP 权重 gather；
-- reward model 的分布式包装；
-- 全局 token normalizer；
-- 日志指标 gather。
+| 后端 | 参数/梯度/optimizer state | 模型计算方式 | rollout 同步 | 更适合 |
+|---|---|---|---|---|
+| DDP | 参数和 optimizer 每卡复制，梯度 all-reduce | 每 rank 完整层 | 直接读取完整 state | 小中模型、调试、链路最简单 |
+| DeepSpeed ZeRO-3 | 三者分片 | 前向按需 gather 参数 | `GatheredParameters` 等 ZeRO 路径 | 已有 DeepSpeed 生态、offload 配置成熟 |
+| FSDP2 FULL_SHARD | 三者分片为 DTensor | 每个 FSDP unit all-gather，计算后可 reshard | `state_dict` + `full_tensor()` | Transformers 生态内的大模型 full/LoRA、组合 vLLM |
+| Megatron | TP/PP/CP/EP/DP 多维切分 | 算子、层、序列、专家显式并行 | Megatron bridge | 超大 Dense/MoE、高吞吐和复杂并行拓扑 |
 
-GRPO 比 SFT 多了一套“训练并行 + 推理并行”的组合。训练 world size 与 vLLM tensor parallel size 不一定相同，但 colocate 时后者必须整除前者。
+FSDP2 的目标不是替代 GRPOTrainer，也不等同于 Megatron TP。FSDP2 主要沿 data-parallel mesh 分片完整层的状态；Megatron TP 则把一个层的矩阵运算本身拆到多卡。对于单层参数都无法在一次 all-gather 后装入单卡的模型，仅增加 FSDP2 卡数未必解决峰值，需要 TP/更细 wrap/更低精度或其他并行设计。
 
-### 12.2 Sequence Parallel 与 padding-free
+GRPO 还叠加一套 rollout 并行。训练 world size 与 vLLM tensor parallel size 不必相同；colocate 时 vLLM TP 必须与训练进程拓扑满足代码的整除/分组要求，external server 则可使用独立节点和并行规模。
+
+### 12.2 FSDP2 的五个重要概念
+
+| 概念 | 含义 | 在 GRPO 中为什么重要 |
+|---|---|---|
+| DeviceMesh | 描述 FSDP ranks 的设备拓扑和 collective group | 决定 DTensor shard 属于哪些进程；所有 rank 必须以相同顺序参加 materialize |
+| DTensor | 带全局形状和 placement 元数据的分布式张量 | `named_parameters()` 看到的可能只是 shard；向 vLLM 传权重前必须还原完整 tensor |
+| FSDP unit | 一次独立 all-gather/reshard 的模块边界 | unit 太大增加峰值，太小增加通信和调度开销 |
+| auto-wrap | 按 transformer layer 类自动建立 FSDP units | 默认依赖模型 `_no_split_modules`/transformer-based policy，应确认 MoE block 是否合理分层 |
+| `reshard_after_forward` | forward 后重新释放完整参数，只保留 shard | 降低常驻显存，但 backward 前需再次 gather，体现显存与通信交换 |
+
+FULL_SHARD 大体执行如下：
+
+~~~text
+初始化：完整 Parameter → 按 mesh 分片的 DTensor + sharded optimizer state
+forward unit N：all-gather unit N 完整参数 → 计算激活 → reshard/free full params
+backward unit N：按需再次 all-gather → 计算梯度 → reduce-scatter gradient shard
+optimizer step：每个 rank 只更新本地参数/状态 shard
+~~~
+
+activation checkpointing 是另一个维度：它不保存部分 forward activation，backward 时重算，以计算换激活显存；FSDP2 则以通信换参数/梯度/optimizer state 显存。两者常同时使用，但不应同时对同一层叠加两套 gradient/activation checkpoint wrapper。
+
+### 12.3 从参数到主 policy 包装的完整时序
+
+~~~mermaid
+sequenceDiagram
+    participant Args as "SFT/RLHFArguments"
+    participant Pipe as "SwiftRLHF Pipeline"
+    participant T as "GRPOTrainer"
+    participant Acc as "HF Trainer / Accelerate"
+    participant F as "FSDP2 ranks"
+
+    Args->>Args: "--fsdp fsdp2 → fsdp2.json + 兼容性检查"
+    Args->>Pipe: "最终 post-init 参数"
+    Pipe->>Pipe: "加载普通 policy/ref，注入 LoRA 或设置 full trainable"
+    Pipe->>T: "构造 GRPOTrainer"
+    T->>Acc: "创建 Accelerator/FSDP plugin"
+    T->>T: "准备 ref/reward、rollout engine、权重分组"
+    T->>Acc: "trainer.train() 准备主模型和 optimizer"
+    Acc->>F: "建立 mesh、auto-wrap、Parameter → DTensor shards"
+    F-->>T: "以 FSDP2 policy 进入 training_step"
+~~~
+
+这个包装时点影响扩展代码：Trainer 构造早期保存的模块引用可能仍是普通模块对象，但开始训练后的 state dict/parameter 是分片语义。不要在插件初始化时缓存一份“完整参数 tensor”并假设它会自动随 FSDP2 更新。
+
+### 12.4 FSDP2 下的 policy、reference 与 reward model
+
+- **主 policy**：由 HF Trainer/Accelerate 在训练准备阶段包装；forward/backward 和 optimizer update 走 FSDP2。
+- **full + `beta>0` reference**：独立冻结模型由 `RLHFTrainerMixin` 通过 `prepare_fsdp` 准备；只做 no-grad forward，不创建训练 optimizer state。
+- **LoRA + `beta>0` reference**：通常无需第二模型，在主 policy 上禁用 adapter 得到基座 log-prob；FSDP units 保持不变。
+- **`beta=0`**：跳过 reference 模型和 ref log-prob，是 full tuning 降低参数与通信开销最直接的开关。
+- **reward model**：可通过相应辅助模型准备路径分布式包装，但它的输入/模板和推理频率仍可能造成独立显存峰值；规则 reward 不受 FSDP2 影响。
+
+reference 是“算法角色”，FSDP2 是“物理存储/执行方式”。将二者分开理解，能避免把“冻结”误解为“每卡必须保留完整副本”。
+
+### 12.5 FSDP2 到 vLLM 的权重桥
+
+训练前向可以只按 unit 临时 gather，但 vLLM 需要某个策略版本的可加载权重。因此 rollout 边界存在第二类全参数访问：
+
+~~~mermaid
+flowchart LR
+    A["FSDP2 DTensor shards"] --> B["split_batches 按层分组"]
+    B --> C["全体 ranks: full_tensor collective"]
+    C --> D{"full 还是 LoRA?"}
+    D -- "full/需 merge" --> E["完整 base 或 tensor-level LoRA merge"]
+    D -- "原生 LoRA" --> F["完整 adapter tensors"]
+    E --> G{"vLLM 模式"}
+    F --> G
+    G -- "colocate" --> H["本地 engine.load_weights"]
+    G -- "server" --> I["rank 0 分桶发送；server 处理版本"]
+    H --> J["finish reload + reset cache"]
+    I --> J
+~~~
+
+三个排错要点：
+
+1. rank 0 网络发送不意味着其他 rank 可以跳过，`full_tensor()` 是 collective；
+2. 分组只能降低“同时 materialize 的参数量”，不能免除每个参数最终被完整还原；
+3. 权重成功加载后必须完成 reload 协议并清 prefix/encoder cache，否则新请求可能继续命中旧权重相关缓存。
+
+### 12.6 colocate 显存状态机与 external 的差别
+
+colocate 模式下最重要的资源循环：
+
+~~~text
+FSDP2 训练状态（model/optimizer shards 在 GPU）
+  → wake vLLM weights（若处于 sleep）
+  → global_step 变化时同步 policy
+  → 可选 offload model/optimizer 到 CPU
+  → wake KV cache → rollout
+  → reset cache / sleep vLLM
+  → reload FSDP2 model/optimizer 到 GPU
+  → 下一轮 forward/backward
+~~~
+
+代码中的 offload context 主要服务 colocate 资源互斥。FSDP2 model offload 会把分片模型移到 CPU，optimizer offload 遍历 optimizer state tensor；它与配置中的 `cpu_ram_efficient_loading` 不是同一功能。`sleep_level`、`offload_model`、`offload_optimizer`、`vllm_gpu_memory_utilization` 共同决定峰值和切换成本。
+
+external server 不与训练卡共享 KV cache/engine 权重，通常无需这套 colocate offload 状态机，训练侧主要付出 full-tensor 聚合和网络/NCCL 权重传输成本。它用更多硬件换取更清晰的显存隔离和训练/推理解耦。
+
+### 12.7 Sequence Parallel、padding-free 与 FSDP2 的边界
 
 逐 token log-prob 支持 sequence parallel、padding-free 和多模态分支。启用 SP 后：
 
@@ -785,30 +1089,21 @@ GRPO 比 SFT 多了一套“训练并行 + 推理并行”的组合。训练 wor
 - completion/token 序列需要在并行组内重组；
 - 某些 fused/Liger 路径不可用。
 
-修改 loss 或 mask 时，必须测试：
+FSDP2 分片的是模型状态，SP 切分的是序列激活，二者概念上正交，但 collective group、形状和 sampler 计数会同时出现。修改 loss 或 mask 时，至少测试：普通 padded batch、padding-free 扁平 token、SP 局部序列、多模态额外输入、只有 completion token 的有效区间，以及 FSDP2 多 rank 的全局 normalizer。
 
-- 普通 padded batch；
-- padding-free 扁平 token；
-- SP 切分后的局部序列；
-- 多模态额外输入；
-- 只有 completion token 的有效区间。
+### 12.8 FSDP2 checkpoint 语义预览
 
-### 12.3 显存生命周期
+默认 `state_dict_type=SHARDED_STATE_DICT`，每个 rank 保存其 shard 及必要元数据。它适合训练续跑，不能把任意一个 shard 当成完整 Hugging Face 模型。加载/保存必须由相同生态的 FSDP checkpoint 流程协同完成；如需部署成单体权重，应显式执行完整 state dict/权重合并流程。
 
-colocate 模式下最重要的资源循环：
+vLLM 同步时临时执行 `full_tensor()` 只为传输当前策略版本，并不会自动把 checkpoint 改成 FULL_STATE_DICT。第 16 节说明产物，第 28 节给出 Qwen3.5 大模型的容量和场景细节。
 
-~~~text
-训练状态
-  → 可选 offload optimizer/model
-  → wake vLLM
-  → 同步权重
-  → rollout
-  → 清 cache / sleep vLLM
-  → reload model/optimizer
-  → 训练状态
-~~~
+### 12.9 当前限制与选型结论
 
-sleep_level、offload_model、offload_optimizer、vllm_gpu_memory_utilization 共同决定是否 OOM 和切换开销。更高 offload 并非总是更快：它以 PCIe/CPU 内存传输换取 GPU 容量。
+- 当前 Swift GRPO rollout 路径明确支持 FSDP2，拒绝 FSDP1；文档或旧脚本中的泛称 `FSDP` 不能直接视作兼容。
+- FSDP2 不能与 DeepSpeed、`device_map` 模型切分叠加。
+- auto-wrap 是否识别目标模型 block、单个 unit 的参数峰值、LoRA/量化可训练参数形态，必须在大模型训练前做小步验证。
+- FSDP2 减少模型状态常驻显存，但 rollout 权重 materialize、logits、长序列 activation、reference/RM 和 vLLM KV cache 仍可能成为峰值。
+- 需要 Transformers 完整功能、又希望分片参数状态时优先评估 FSDP2；需要 TP/PP/EP 控制或单层无法 materialize 时评估 Megatron；已有成熟 ZeRO 配置时 DeepSpeed 仍是可行路径。
 
 ---
 
@@ -883,6 +1178,19 @@ Megatron 实现保持了大部分核心语义：
 
 不要直接把 Transformers 示例参数复制到 Megatron；应从 [Megatron 示例](../../tests/megatron/test_grpo.py) 或对应 examples 配置起步。
 
+### 13.5 FSDP2 与 Megatron 不应按“谁更高级”比较
+
+| 问题 | Transformers + FSDP2 | Megatron |
+|---|---|---|
+| GRPO 公式实现 | Swift `GRPOTrainer`/TRL 主线 | 独立 `MegatronGRPOTrainer.loss_func` |
+| 主要并行手段 | data-parallel mesh 上 FULL_SHARD | TP/PP/CP/EP/DP 多维组合 |
+| 模型生态 | Hugging Face/PEFT/Accelerate 集成直接 | 需模型转换/桥接和 Megatron 适配 |
+| 单层峰值 | FSDP unit 计算时通常要 materialize 完整 unit | TP 可把单层矩阵本身切分 |
+| rollout 权重桥 | DTensor `full_tensor()`/adapter 收集 | Megatron 参数映射与 bridge |
+| 功能验证重点 | auto-wrap、DTensor、state dict、collective 顺序 | rank topology、pipeline stage、参数映射、loss 对齐 |
+
+选择后端应由模型层峰值、并行拓扑、生态功能和运维复杂度决定，而不是由参数量单一决定。第 27、28 节用同一 Qwen3.5-35B-A3B 场景做了更细的逐项对照。
+
 ---
 
 ## 14. Ray Megatron GRPO 路径
@@ -936,6 +1244,8 @@ BaseRayTrainer 负责循环数据、资源 wake/sleep、训练模型和优化器
 - Ray 配置增加了 placement、actor 数、每组 GPU、资源共置等新的失败面；
 - 调试应先确认 actor/资源拓扑，再排查 GRPO 算法本身。
 
+Ray Megatron 的 separate 与 Transformers/FSDP2 的 vLLM server 都能实现训练/rollout 分离，但控制面不同：前者由 Ray actor/placement group 统一编排训练 worker 与 rollout replica；后者由 HF/FSDP2 训练进程通过 `VLLMClient` 连接独立服务。不能把 Ray YAML 中的资源字段直接移植为 FSDP2 CLI 参数。
+
 ---
 
 ## 15. 算法扩展功能地图
@@ -963,6 +1273,8 @@ BaseRayTrainer 负责循环数据、资源 wake/sleep、训练模型和优化器
 | Gym | gym_env | 环境累计回报 | gym_env.py |
 
 官方专题文档位于 [docs/source/Instruction/GRPO](../source/Instruction/GRPO/index.rst)，其中 AdvancedResearch 目录可用来补充论文背景；源码仍应以上表入口为最终依据。
+
+这些算法在 Transformers 主线中由同一个 `_compute_loss_and_metrics` 选择，FSDP2 不另写一份公式：只要某功能没有显式禁止，它随 policy forward/backward 运行在 FSDP2 上。Megatron 拥有独立 loss 实现，Ray 又复用 Megatron，因此“某参数在 dataclass 中存在”不等于三个训练循环已达到相同覆盖；新增算法必须分别核对主线、Megatron 和 Ray。
 
 ---
 
@@ -1005,6 +1317,26 @@ BaseRayTrainer 负责循环数据、资源 wake/sleep、训练模型和优化器
 
 排查“命令行参数未生效”时，先比较 args.json，而不是依赖启动命令的原始文本。
 
+### 16.4 FSDP2 checkpoint、续训与部署产物
+
+默认 [fsdp2.json](../../swift/config/fsdp2.json) 使用 `SHARDED_STATE_DICT`：
+
+- 每个 rank 保存局部分片和元数据，训练续跑时由 FSDP/Accelerate 协同恢复；
+- optimizer state 同样具有分片语义，不能只复制一个 rank 的文件期待完整恢复；
+- `save_only_model=true` 与默认 sharded state dict 被参数校验拒绝；
+- 恢复时应保留原训练的 FSDP 配置、world size 兼容性和 Trainer state，并以实际 Accelerate/PyTorch 版本能力为准；
+- 若最终只训练 LoRA，部署通常消费 adapter 产物；若需要 standalone full model，则要使用支持的 full-state/merge 导出流程验证权重完整性。
+
+不要混淆三类“完整权重”：
+
+| 场景 | 完整权重是否持久化 | 用途 |
+|---|---:|---|
+| FSDP2 forward unit all-gather | 否 | 临时执行某一层计算 |
+| rollout `full_tensor()` | 否 | 把当前策略版本同步到 vLLM |
+| FULL_STATE_DICT/模型导出 | 是 | 部署、转换或非 FSDP 加载 |
+
+最小恢复测试应至少包含：保存后重启到下一 global step、optimizer/scheduler 连续、LoRA adapter 可加载、reference 语义不变、首次新 rollout 确实同步恢复后的策略。
+
 ---
 
 ## 17. 配置阅读与调参清单
@@ -1022,6 +1354,25 @@ swift rlhf \
   --per_device_train_batch_size 1 \
   --gradient_accumulation_steps 1
 ~~~
+
+若要在多卡 Transformers 主线启用 FSDP2，先从同样的小数据/短序列冒烟配置增加一项：
+
+~~~bash
+NPROC_PER_NODE=8 \
+swift rlhf \
+  --rlhf_type grpo \
+  --model Qwen/Qwen3-1.7B \
+  --dataset AI-MO/NuminaMath-TIR \
+  --reward_funcs accuracy format \
+  --fsdp fsdp2 \
+  --num_generations 2 \
+  --max_completion_length 256 \
+  --per_device_train_batch_size 1 \
+  --gradient_accumulation_steps 1 \
+  --max_steps 3
+~~~
+
+它只演示 FSDP2 的启用入口，不是大模型容量配置。正式场景必须再按模型架构、world size、reference、rollout 模式和显存预算调整；Qwen3.5-35B-A3B 模板见第 28 节。
 
 ### 17.2 建议按层调参
 
@@ -1053,6 +1404,15 @@ swift rlhf \
 - sequence importance sampling 与 rollout IS correction 是不同层次的权重，不要混淆；
 - beta、kl_in_reward 和 sync_ref_model 共同决定参考约束。
 
+第五层：最后扩展分布式和 checkpoint。
+
+- 先确认 `--fsdp fsdp2` 后日志识别为 FSDP version 2，而非旧 FSDP1；
+- 查看 wrap 后每个 unit/transformer block 是否符合预期，特别是 MoE block；
+- 先用 `use_vllm=false` 验证前反向，再分别验证 colocate 或 server 权重同步；
+- full tuning + `beta>0` 要把独立 reference 的容量与前向通信计入；
+- colocate 分别观测训练、full-tensor materialize、vLLM wake/KV cache、reload 四个峰值；
+- 在长跑前做一次 sharded checkpoint 保存→重启→生成新 rollout 的闭环测试。
+
 ### 17.3 常见参数组
 
 | 目标 | 参数 |
@@ -1065,8 +1425,20 @@ swift rlhf \
 | DAPO | dynamic_sample、max_resample_times、overlong_filter、soft_* |
 | rollout 后端 | use_vllm、vllm_mode、vllm_tensor_parallel_size |
 | 内存 | sleep_level、offload_model、offload_optimizer、vllm_gpu_memory_utilization |
+| FSDP2 | fsdp、fsdp_config、activation_checkpointing、state_dict_type、move_model_batches |
 | 偏差修正 | importance_sampling_level、rollout_importance_sampling_mode、threshold |
 | 可观测性 | log_completions、log_entropy、log_rollout_offpolicy_metrics |
+
+### 17.4 后端选择清单
+
+在写大模型脚本前依次回答：
+
+1. **单个 transformer/MoE block 完整 materialize 能否放入单卡？** 不能时仅靠 FULL_SHARD 不够，应评估 TP/Megatron 或更细可行 wrap。
+2. **训练功能是否依赖 HF/PEFT/Transformers 插件？** 依赖越强，FSDP2 主线通常迁移成本越低。
+3. **rollout 与训练是否必须共卡？** 显存紧张且有额外机器时优先 external；资源有限才精调 colocate sleep/offload。
+4. **full 还是 LoRA？`beta` 是否为 0？** 这决定 trainable state、reference 副本和 vLLM 同步量。
+5. **要续训还是只导出 adapter？** 这决定 SHARDED_STATE_DICT 保存、optimizer state 和最终 merge/导出方案。
+6. **需要哪些算法扩展？** 先查第 15 节在目标训练循环中的实现，不要仅按参数名推断后端支持。
 
 ---
 
@@ -1083,6 +1455,8 @@ swift rlhf \
 | [tests/utils/test_async_rewards.py](../../tests/utils/test_async_rewards.py) | daemon event loop、async ORM、并发性能 | 覆盖异步奖励基础设施 |
 | [tests/test_align/test_rlhf_loss.py](../../tests/test_align/test_rlhf_loss.py) | 预期为 loss 对齐 | 当前文件为空，属于明显覆盖缺口 |
 
+当前未发现专门覆盖“GRPO + FSDP2”的自动化测试。已有多 GPU FSDP2 训练示例主要属于 SFT/LoRA 基础设施，不能替代 rollout 权重收集、reference、DTensor LoRA merge 和 sharded checkpoint 的 GRPO 集成验证。这是本轮 review 识别出的主要测试空白之一。
+
 ### 18.2 推荐补测优先级
 
 1. 建立纯 CPU 的 advantage/loss 数值测试，覆盖 GRPO、RLOO、REINFORCE++ 和所有 normalization。
@@ -1092,7 +1466,10 @@ swift rlhf \
 5. 测试 vLLM token IDs 与模板编码后的 completion_mask 精确对齐。
 6. 测试多轮环境观察被 loss mask 排除。
 7. 测试 reward None/NaN、多奖励 GDPO、Gym 混合权重。
-8. 测试 ZeRO-3/FSDP/LoRA 的权重同步是否改变 rollout 输出。
+8. 测试 ZeRO-3/FSDP2/LoRA 的权重同步是否改变 rollout 输出。
+9. FSDP2 full 与 LoRA 分别测试 colocate/server；验证所有 rank 参与 `full_tensor()` 且只有约定 rank 发网络权重。
+10. 测试 `SHARDED_STATE_DICT` 保存/恢复后 global step、optimizer、adapter 与首次 rollout 权重版本连续。
+11. 测试 FSDP2 + `beta=0` 不构造 ref，以及 full + `beta>0` 独立 ref 确实被分片包装。
 
 ### 18.3 示例导航
 
@@ -1110,6 +1487,9 @@ swift rlhf \
 | CHORD | [examples/train/grpo/internal/chord.sh](../../examples/train/grpo/internal/chord.sh) |
 | Ray colocate | [examples/ray/grpo/ray_grpo_colocate.yaml](../../examples/ray/grpo/ray_grpo_colocate.yaml) |
 | Ray separate | [examples/ray/grpo/ray_grpo_separate.yaml](../../examples/ray/grpo/ray_grpo_separate.yaml) |
+| FSDP2 LoRA 基础设施参考（SFT） | [examples/train/multi-gpu/fsdp2_lora/train.sh](../../examples/train/multi-gpu/fsdp2_lora/train.sh) |
+| FSDP2 QLoRA 基础设施参考（SFT） | [examples/train/multi-gpu/fsdp_qlora/train.sh](../../examples/train/multi-gpu/fsdp_qlora/train.sh) |
+| Qwen3.5 GRPO FSDP2 推导脚本 | 第 28 节的 colocate/external、LoRA/full 四场景 |
 
 ---
 
@@ -1206,6 +1586,22 @@ swift rlhf \
 4. 检查 YAML 字段拼写和 CLI 覆盖顺序；
 5. 检查 Transformers 与 Megatron 同名参数是否语义完全一致。
 
+### 19.8 FSDP2 启动、通信与保存问题
+
+| 现象 | 首查项 | 原因/方向 |
+|---|---|---|
+| 启动提示 FSDP1 不支持 | `args.json` 的 fsdp/version、实际配置文件 | GRPO rollout mixin 只接受 FSDP2；不要使用旧 FSDP1 配置 |
+| 与 DeepSpeed/device_map 冲突 | CLI/YAML 是否残留 deepspeed 或 auto device map | 主模型分片后端不能叠加，FSDP mesh 也不是 `device_map` |
+| 首次 policy forward OOM | auto-wrap unit、单 block 参数、activation、reference | FULL_SHARD 降低常驻状态，但计算某 unit 仍需 gather 完整权重 |
+| rollout 前卡死 | 各 rank 是否同顺序进入 `full_tensor()`、某 rank 是否提前 return/异常 | external 也要求所有 FSDP ranks 参加 collective |
+| rollout 同步瞬时 OOM | `move_model_batches`、dtype、LoRA 是否走 full merge、colocate vLLM 是否醒着 | 分组降低同时 materialize 峰值；必要时调整 sleep/offload/外置 rollout |
+| 新权重已发但生成不变 | `_last_loaded_step`、server process/finish、cache reset、adapter 名 | 区分未到新 global step、传输未完成和旧 cache 命中 |
+| checkpoint 只有若干 shard | `state_dict_type` | 默认是预期的 SHARDED_STATE_DICT，不是文件丢失 |
+| shard 无法单独加载/导出 | 加载流程、world size/版本、是否执行 full-state merge | 单个 shard 不是 Hugging Face 完整权重 |
+| 保存时报 `save_only_model` 冲突 | FSDP config 与 save_only_model | 默认 sharded state 需要完整恢复语义，参数初始化会拒绝不兼容组合 |
+
+排查 collective 卡死时不要让某个 rank 单独继续执行完整权重收集。先保留所有 rank 日志，确定最后一个共同进入的参数组；再缩小 `move_model_batches`、关闭 LoRA merge 或用小模型复现，以区分 collective 顺序错误和纯显存不足。
+
 ---
 
 ## 20. 后续深入阅读路线
@@ -1272,7 +1668,21 @@ swift rlhf \
 
 重点是结束条件、消息结构、环境观察 loss mask、轨迹奖励、最大轮数和跨 rank 一致性。
 
-### 20.6 想做大规模 Megatron/Ray 优化
+### 20.6 想深入 FSDP2 或修改分片适配
+
+按生命周期阅读，不要从 `full_tensor()` 单点开始：
+
+1. [swift/arguments/sft_args.py](../../swift/arguments/sft_args.py)：`--fsdp fsdp2` 如何被转换、校验；
+2. [swift/config/fsdp2.json](../../swift/config/fsdp2.json)：wrap、reshard、activation checkpoint 和 state dict 默认值；
+3. [SwiftRLHF pipeline](../../swift/pipelines/train/rlhf.py) 与 [SwiftSft.run](../../swift/pipelines/train/sft.py)：普通模型加载、tuner 注入与 Trainer 构造时序；
+4. `GRPOTrainer.__init__`、`RLHFTrainerMixin` 和 [prepare_fsdp](../../swift/rlhf_trainers/utils.py)：主模型与辅助模型为什么在不同位置包装；
+5. Accelerate FSDP2 plugin/`fsdp2_prepare_model`：Swift 之外真正创建 mesh、fully shard module 的边界；
+6. [rollout_mixin.py](../../swift/rlhf_trainers/rollout_mixin.py)：`split_batches` → `_move_model_to_vllm` → collect/load/finish/cache reset；
+7. HF Trainer/Accelerate checkpoint 路径：sharded state 保存、恢复、full-state 导出。
+
+建议设置断点/日志观察五个事实：包装前后 parameter 类型与全局/局部 shape；每个 FSDP unit 的边界；policy/ref 的 requires_grad 和包装状态；一次 rollout 同步每组 materialize 的参数名与字节数；保存后每 rank 产物及恢复后的 global step。确认这些事实后，再深入研究通信优化才不容易把框架行为误判为 GRPO 算法问题。
+
+### 20.7 想做大规模 Megatron/Ray 优化
 
 先画清资源拓扑：
 
@@ -1317,6 +1727,14 @@ train/rollout colocate 或 separate
 | Megatron 如何喂入 rollout 数据 | MegatronGRPOTrainer._replace_data_iterator |
 | Megatron loss 在哪里 | MegatronGRPOTrainer.forward_step、loss_func |
 | Ray 主循环在哪里 | Ray Megatron GRPOTrainer._train_loop |
+| `--fsdp fsdp2` 在哪里展开 | SFTArguments 的 FSDP post-init、swift/config/fsdp2.json |
+| FSDP2 主 policy 何时包装 | HF Trainer.train/Accelerate prepare 边界 |
+| 独立 reference 如何 FSDP2 包装 | RLHFTrainerMixin、utils.prepare_fsdp |
+| 如何判定 FSDP1/2 | RolloutTrainerMixin.__init__、accelerator.is_fsdp2 |
+| FSDP2 参数如何分组同步 | split_batches、_collect_state_dict_for_vllm |
+| FSDP2 LoRA 如何同步 | _move_adapter_to_vllm、_merge_lora_into_state_dict |
+| colocate 如何释放/恢复 FSDP2 状态 | offload_context、offload_model、offload_optimizer |
+| FSDP2 checkpoint 配置在哪里 | swift/config/fsdp2.json、HF Trainer/Accelerate save/load |
 
 ---
 
@@ -1331,24 +1749,41 @@ sequenceDiagram
     participant RW as "Reward"
     participant Ref as "Reference"
     participant P as "Policy"
+    participant Dist as "Accelerate / FSDP2"
     participant Opt as "Optimizer"
 
     DS->>Sampler: "messages + solution"
     Sampler->>T: "同一 prompt × G"
-    T->>E: "同步权重并发送 prompts"
+    alt "需要新 rollout 且 global_step 已变化"
+        T->>Dist: "请求当前 policy state"
+        Dist->>Dist: "各 rank 按组 full_tensor()"
+        Dist->>E: "colocate 加载或 rank 0 分桶发送"
+        E->>E: "完成 reload 并清 cache"
+    end
+    T->>E: "发送 prompts"
     E-->>T: "response token IDs + rollout log-probs"
     T->>RW: "completion + 数据额外列"
     RW-->>T: "各奖励列"
-    T->>P: "no_grad 计算 old log-probs"
-    T->>Ref: "no_grad 计算 ref log-probs"
+    T->>Dist: "policy no_grad forward"
+    Dist->>P: "FSDP unit gather/forward/reshard"
+    P-->>T: "old log-probs"
+    T->>Ref: "独立分片 ref，或禁用 LoRA adapter"
+    Ref-->>T: "ref log-probs"
     T->>T: "组内统计并计算 advantages"
     T->>T: "编码、切分并缓存 micro-batches"
     loop "steps_per_generation × num_iterations"
-        T->>P: "有梯度计算 current log-probs"
+        T->>Dist: "有梯度 policy forward/backward"
+        Dist->>P: "unit gather/reshard"
         P-->>T: "ratio / KL / token loss"
-        T->>Opt: "backward / accumulate / step"
+        T->>Dist: "reduce-scatter gradient shards"
+        alt "达到 gradient accumulation 边界"
+            Dist->>Opt: "更新本地 optimizer/parameter shards"
+            Opt-->>T: "global_step +1"
+        end
     end
 ~~~
+
+时序图中的 `steps_per_generation × num_iterations` 是 micro-step 消费次数；optimizer 分支只在 gradient accumulation 边界执行。若 `use_vllm=false`，最上方同步分支消失，TransformersEngine 直接使用训练模型生成；若不是 FSDP2，`Dist` 参与者分别退化为 DDP 或 ZeRO 对应的参数访问/梯度通信。
 
 ---
 
@@ -1369,6 +1804,16 @@ sequenceDiagram
 | dynamic sampling | 丢弃零方差组并补采样 |
 | colocate | 训练和 rollout 共享 GPU 资源 |
 | server | rollout 为独立服务，训练通过客户端请求 |
+| FSDP2 | PyTorch composable fully-sharded data parallel v2；在 mesh 上把参数、梯度和 optimizer state 表示为分片状态 |
+| DTensor | 包含全局 shape 与 mesh placement 的分布式张量；本地值只是 shard |
+| DeviceMesh | 组织分布式 rank 和 collective group 的设备拓扑 |
+| FSDP unit | 一次参数 all-gather、计算和 reshard 的模块边界 |
+| auto-wrap | 根据 transformer block 类型自动建立 FSDP units 的策略 |
+| reshard_after_forward | forward 后释放完整参数、恢复只持有 shard 的状态 |
+| SHARDED_STATE_DICT | 按 rank/分片保存并由 FSDP 流程协同恢复的 checkpoint 形式 |
+| FULL_STATE_DICT | 聚合为完整模型参数的 state dict，常用于导出/非分片加载，生成开销和峰值更高 |
+| policy version | 一次 optimizer update 后由 global_step 标识的策略状态；rollout engine 只在同步完成后拥有该版本 |
+| materialize | 从 shards 临时还原某参数或参数组的完整 tensor；不等于持久化 checkpoint |
 
 ---
 
@@ -1380,10 +1825,22 @@ sequenceDiagram
 2. 对照 completions.jsonl 手工复算一组 reward 和 advantage；
 3. 在 _compute_loss_and_metrics 处核对四类 log-prob 的形状与数值；
 4. 切换 vLLM colocate，并观察 rollout off-policy 指标；
-5. 再尝试 server、multi-turn 或 Gym；
-6. 最后进入 Megatron/Ray，并先验证同一小 batch 的算法数值对齐。
+5. 在多卡小模型上启用 FSDP2，观察包装后的 DTensor、unit 边界、一次 forward/backward 与 sharded checkpoint；
+6. 分别验证 FSDP2 + vLLM colocate 和 server 的权重版本同步，再尝试 multi-turn 或 Gym；
+7. 最后进入 Megatron/Ray，并先验证同一小 batch 的算法数值对齐。
 
-从代码维护角度，后续最值得优先建设的是：Transformers/Megatron loss 的共享数值测试、跨 rank prompt 分组测试，以及“权重版本—rollout 请求—日志记录”的端到端追踪。它们能显著降低新增算法和大规模后端优化时的回归风险。
+可以用下面的“掌握标准”自检：
+
+- 能从 `swift rlhf` 追到 `training_step → _prepare_inputs → rollout/reward/encode/advantage → compute_loss → backward`；
+- 能解释 `_step`、`global_step`、steps_per_generation、num_iterations 和 gradient accumulation 的换算；
+- 能给定一个张量名称，说明其创建者、shape、是否有梯度、何时跨 rank；
+- 能解释 full/LoRA、`beta=0/>0` 下 reference 的模型数量和执行路径；
+- 能画出 FSDP2 policy shard → `full_tensor()` → colocate/server vLLM 的权重链；
+- 能区分 forward 临时 all-gather、rollout materialize 和 FULL_STATE_DICT 导出；
+- 能根据需求选择 FSDP2、ZeRO 或 Megatron，并指出需要验证的容量与功能边界；
+- 能从第 21 节函数索引进入 reward、loss、rollout、FSDP2 或 checkpoint 专题，而不是全文盲搜。
+
+从代码维护角度，后续最值得优先建设的是：Transformers/Megatron loss 的共享数值测试、跨 rank prompt 分组测试、FSDP2 GRPO full/LoRA 集成测试，以及“FSDP shards—权重版本—rollout 请求—日志记录”的端到端追踪。它们能显著降低新增算法和大规模后端优化时的回归风险。
 
 ---
 
