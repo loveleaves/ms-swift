@@ -1,0 +1,12 @@
+{"messages":[{"role":"system","content":"你是一个准确、简洁的中文助手。"},{"role":"user","content":"什么是有监督微调？"},{"role":"assistant","content":"有监督微调是使用输入与目标回答成对的数据继续训练预训练模型，使模型学会按期望方式完成任务。"}]}
+{"messages":[{"role":"system","content":"你是一个准确、简洁的中文助手。"},{"role":"user","content":"为什么 SFT 通常只在 assistant 回复上计算损失？"},{"role":"assistant","content":"用户和系统文本用于提供条件，assistant 文本才是模型需要学习生成的目标；屏蔽提示词损失可以把梯度集中在期望回答上。"}]}
+{"messages":[{"role":"user","content":"LoRA 与全参数微调的主要区别是什么？"},{"role":"assistant","content":"全参数微调更新模型的大部分或全部权重；LoRA 冻结基座，只训练注入到线性层中的低秩增量矩阵，因此优化器状态和检查点更小。"}]}
+{"messages":[{"role":"user","content":"用一句话解释梯度累积。"},{"role":"assistant","content":"梯度累积是在多个微批次上累加梯度后再更新一次参数，用较小显存模拟更大的全局批量。"}]}
+{"messages":[{"role":"user","content":"训练集和验证集为什么要去重？"},{"role":"assistant","content":"如果相同或近似样本同时出现在训练集和验证集，验证指标会因数据泄漏而虚高，无法反映泛化能力。"}]}
+{"messages":[{"role":"user","content":"什么是 causal language modeling？"},{"role":"assistant","content":"因果语言建模让模型在只能看到左侧上下文的条件下预测下一个 token。"}]}
+{"messages":[{"role":"user","content":"2 加 3 等于多少？"},{"role":"assistant","content":"2 加 3 等于 5。"},{"role":"user","content":"再乘以 4 呢？"},{"role":"assistant","content":"5 乘以 4 等于 20。"}]}
+{"instruction":"把下面句子翻译成英文。","input":"机器学习需要可靠的数据。","output":"Machine learning requires reliable data."}
+{"instruction":"给出 Python 列表去重且保持顺序的一行代码。","output":"可以使用 list(dict.fromkeys(items))。"}
+{"messages":[{"role":"system","content":"你是代码审查助手。"},{"role":"user","content":"函数打开文件后没有关闭，应该如何改进？"},{"role":"assistant","content":"使用 with open(...) as file 的上下文管理器，让文件在代码块结束时自动关闭。"}]}
+{"messages":[{"role":"user","content":"模型训练时出现 NaN，第一步检查什么？"},{"role":"assistant","content":"先检查输入和标签是否存在异常值、有效标签是否为空，以及 loss 和梯度从哪一步开始变成 NaN；随后再检查学习率与混合精度。"}]}
+{"messages":[{"role":"user","content":"为什么训练后还要做生成测试？"},{"role":"assistant","content":"验证损失只能说明模型对目标 token 的概率变化；生成测试还能发现模板、结束符、检查点加载和实际回答质量的问题。"}]}
